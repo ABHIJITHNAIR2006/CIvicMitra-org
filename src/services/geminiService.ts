@@ -1,29 +1,3 @@
-import { GoogleGenAI } from "@google/genai";
-
-const apiKey = process.env.GEMINI_API_KEY || (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_API_KEY) || "";
-
-const CANDIDATE_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash"];
-
-async function generateContentWithFallback(ai: GoogleGenAI, contents: any[], config?: any) {
-  let lastError: any = null;
-  for (const model of CANDIDATE_MODELS) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents,
-        config
-      });
-      if (response && response.text) {
-        return response;
-      }
-    } catch (err: any) {
-      console.warn(`Client fallback model ${model} failed:`, err?.message || err);
-      lastError = err;
-    }
-  }
-  throw lastError || new Error("All AI models failed to respond");
-}
-
 export interface ScanCandidateChallenge {
   challengeId: string;
   title: string;
@@ -37,6 +11,12 @@ export interface ScreenScanResult {
   matchedChallengeId: string | null;
   confidence: number; // 0.0–1.0
   verified: boolean;
+  reason: string;
+}
+
+export interface VerifyProofResult {
+  verified: boolean;
+  score: number;
   reason: string;
 }
 
@@ -54,158 +34,182 @@ export async function scanScreenForCivicChallenge(
     };
   }
 
-  // 1. Try server-side API first to keep keys protected
+  if (!imageBase64) {
+    return {
+      isCivicRelated: false,
+      matchedChallengeId: null,
+      confidence: 0,
+      verified: false,
+      reason: "No image captured for screening."
+    };
+  }
+
+  const base64Data = imageBase64.includes(",") ? imageBase64.split(",")[1] : imageBase64;
+  const payloadKb = Math.round((base64Data?.length || 0) / 1024);
+  const startTime = Date.now();
+  console.log(`[${new Date().toISOString()}] [scanScreenForCivicChallenge] Sending screen scan (${candidates.length} candidates, ~${payloadKb} KB)`);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error("Screen scan request timed out after 20s"));
+  }, 20000);
+
   try {
     const res = await fetch("/api/screen-scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ imageBase64, candidates })
+      body: JSON.stringify({ imageBase64, candidates }),
+      signal: controller.signal
     });
+    clearTimeout(timeoutId);
 
-    if (res.ok) {
-      const data = await res.json();
-      return data;
-    }
-  } catch (err) {
-    console.warn("Server-side screen scan route unavailable, attempting client fallback:", err);
-  }
+    const duration = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] [scanScreenForCivicChallenge] Server responded in ${duration}ms with HTTP status ${res.status}`);
 
-  // 2. Direct client fallback if API key available in development
-  if (apiKey) {
-    try {
-      const ai = new GoogleGenAI({ apiKey });
-      const base64Data = imageBase64.includes(",") ? imageBase64.split(",")[1] : imageBase64;
+    const contentType = res.headers.get("content-type") || "";
+    if (!res.ok) {
+      let errorDetail = "";
+      if (contentType.includes("application/json")) {
+        try {
+          const errorJson = await res.json();
+          errorDetail = errorJson.reason || errorJson.error || JSON.stringify(errorJson);
+        } catch {}
+      } else {
+        const errorText = await res.text();
+        errorDetail = errorText.slice(0, 300);
+      }
 
-      const candidatesListFormatted = candidates
-        .map(
-          (c, idx) =>
-            `[${idx + 1}] ID: "${c.challengeId}"
-   Title: "${c.title}"
-   Category: "${c.category}"
-   Points: ${c.points}
-   Proof Instructions: "${c.proofInstructions}"`
-        )
-        .join("\n\n");
-
-      const prompt = `You are a strict civic action verification AI agent for CivicMitra.
-A user has submitted a captured screen or photo as proof of completing a civic or ecological action.
-
-Evaluate the image against the active challenges:
-${candidatesListFormatted}
-
-CRITERIA:
-1. Reject generic unrelated screenshots (social media, blank screen, games).
-2. The image MUST provide clear proof satisfying one challenge's "Proof Instructions".
-3. "verified" is true ONLY IF isCivicRelated is true AND matchedChallengeId matches a candidate AND confidence >= 0.70.
-
-Return strict JSON:
-{
-  "isCivicRelated": boolean,
-  "matchedChallengeId": string | null,
-  "confidence": number,
-  "verified": boolean,
-  "reason": string
-}`;
-
-      const response = await generateContentWithFallback(
-        ai,
-        [
-          { text: prompt },
-          {
-            inlineData: {
-              mimeType: "image/jpeg",
-              data: base64Data
-            }
-          }
-        ],
-        {
-          responseMimeType: "application/json"
-        }
-      );
-
-      const parsed = JSON.parse(response.text || "{}");
-      const validCandidateIds = new Set(candidates.map((c) => c.challengeId));
-      const matchedId =
-        parsed.matchedChallengeId && validCandidateIds.has(parsed.matchedChallengeId)
-          ? parsed.matchedChallengeId
-          : null;
-      const confidence = typeof parsed.confidence === "number" ? Math.min(Math.max(parsed.confidence, 0), 1) : 0;
-      const isCivicRelated = Boolean(parsed.isCivicRelated);
-      const verified = Boolean(parsed.verified && isCivicRelated && matchedId !== null && confidence >= 0.70);
+      console.error(`[${new Date().toISOString()}] [scanScreenForCivicChallenge] Error ${res.status} (${res.statusText}):`, errorDetail);
 
       return {
-        isCivicRelated,
-        matchedChallengeId: matchedId,
-        confidence,
-        verified,
-        reason: parsed.reason || (verified ? "Civic proof verified!" : "Does not fulfill challenge criteria.")
+        isCivicRelated: false,
+        matchedChallengeId: null,
+        confidence: 0,
+        verified: false,
+        reason: errorDetail || `Screen scan service error (HTTP ${res.status})`
       };
-    } catch (e: any) {
-      console.error("Client fallback error:", e);
     }
-  }
 
-  return {
-    isCivicRelated: false,
-    matchedChallengeId: null,
-    confidence: 0,
-    verified: false,
-    reason: "AI verification service is temporarily unavailable. Please try again."
-  };
+    if (!contentType.includes("application/json")) {
+      const text = await res.text();
+      console.error("[scanScreenForCivicChallenge] Expected JSON response but received non-JSON:", text.slice(0, 300));
+      return {
+        isCivicRelated: false,
+        matchedChallengeId: null,
+        confidence: 0,
+        verified: false,
+        reason: "Server returned non-JSON response. Please verify Vercel function routes."
+      };
+    }
+
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    const duration = Date.now() - startTime;
+    const isTimeout = err?.name === "AbortError" || err?.message?.includes("timed out");
+    console.error(`[${new Date().toISOString()}] [scanScreenForCivicChallenge] Request failed after ${duration}ms:`, err);
+    return {
+      isCivicRelated: false,
+      matchedChallengeId: null,
+      confidence: 0,
+      verified: false,
+      reason: isTimeout
+        ? "Screen scan timed out (20s). Please check your connection and try again."
+        : (err?.message ? `Network request failed: ${err.message}` : "Failed to connect to screen scan service.")
+    };
+  }
 }
 
-export async function verifyEcoProof(imageUrl: string, challengeTitle: string, instructions: string) {
-  // 1. Try server-side proxy
+export async function verifyEcoProof(
+  imageUrl: string,
+  challengeTitle: string,
+  instructions: string
+): Promise<VerifyProofResult> {
+  if (!imageUrl) {
+    console.error("[verifyEcoProof] Error: imageUrl is empty or null.");
+    return {
+      verified: false,
+      score: 0,
+      reason: "No image provided for verification."
+    };
+  }
+
+  const base64Data = imageUrl.includes(",") ? imageUrl.split(",")[1] : imageUrl;
+  const payloadKb = Math.round((base64Data?.length || 0) / 1024);
+  const startTime = Date.now();
+  console.log(`[${new Date().toISOString()}] [verifyEcoProof] Sending proof for "${challengeTitle}" (~${payloadKb} KB)`);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error("Verification request timed out after 20s"));
+  }, 20000);
+
   try {
     const res = await fetch("/api/verify-proof", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ imageUrl, challengeTitle, instructions })
+      body: JSON.stringify({ imageUrl, challengeTitle, instructions }),
+      signal: controller.signal
     });
+    clearTimeout(timeoutId);
 
-    if (res.ok) {
-      return await res.json();
-    }
-  } catch {
-    // Continue to client fallback
-  }
+    const duration = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] [verifyEcoProof] Server responded in ${duration}ms with HTTP status ${res.status}`);
 
-  if (!apiKey) {
-    console.error("GEMINI_API_KEY is not set. AI verification disabled.");
-    return { verified: false, score: 0, reason: "Verification service not configured" };
-  }
-
-  try {
-    const ai = new GoogleGenAI({ apiKey });
-    const base64Data = imageUrl.includes(",") ? imageUrl.split(",")[1] : imageUrl;
-    const response = await generateContentWithFallback(
-      ai,
-      [
-        {
-          text: `You are an eco-verification AI for CivicMitra. 
-The user is submitting proof for the challenge: "${challengeTitle}".
-Instructions: "${instructions}".
-Analyze the image and determine if it shows valid proof of the challenge being completed.
-Return a JSON object with:
-- verified: boolean
-- score: number (0.0 to 1.0 confidence that it is NOT AI generated and is valid)
-- reason: string (explanation of why it was verified or rejected)`
-        },
-        {
-          inlineData: {
-            mimeType: "image/jpeg",
-            data: base64Data
-          }
-        }
-      ],
-      {
-        responseMimeType: "application/json"
+    const contentType = res.headers.get("content-type") || "";
+    if (!res.ok) {
+      let errorDetail = "";
+      if (contentType.includes("application/json")) {
+        try {
+          const errorJson = await res.json();
+          errorDetail = errorJson.reason || errorJson.error || JSON.stringify(errorJson);
+        } catch {}
+      } else {
+        const errorText = await res.text();
+        errorDetail = errorText.slice(0, 300);
       }
-    );
 
-    return JSON.parse(response.text || "{}");
-  } catch (error) {
-    console.error("AI Verification failed:", error);
-    return { verified: false, score: 0, reason: "Verification service error" };
+      console.error(
+        `[${new Date().toISOString()}] [verifyEcoProof] Server error ${res.status} (${res.statusText}):`,
+        errorDetail
+      );
+
+      return {
+        verified: false,
+        score: 0,
+        reason: errorDetail || `Verification service failed with status ${res.status}`
+      };
+    }
+
+    if (!contentType.includes("application/json")) {
+      const text = await res.text();
+      console.error("[verifyEcoProof] Expected JSON response but received non-JSON:", text.slice(0, 300));
+      return {
+        verified: false,
+        score: 0,
+        reason: "Server returned an invalid non-JSON response. Please check server routing."
+      };
+    }
+
+    const data = await res.json();
+    console.log(`[${new Date().toISOString()}] [verifyEcoProof] Verification result: verified=${data.verified}, score=${data.score}`);
+    return {
+      verified: Boolean(data.verified),
+      score: typeof data.score === "number" ? data.score : 0,
+      reason: data.reason || (data.verified ? "Proof verified successfully!" : "Verification failed.")
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    const duration = Date.now() - startTime;
+    const isTimeout = err?.name === "AbortError" || err?.message?.includes("timed out");
+    console.error(`[${new Date().toISOString()}] [verifyEcoProof] Request failed after ${duration}ms:`, err);
+    return {
+      verified: false,
+      score: 0,
+      reason: isTimeout
+        ? "AI verification request timed out (20s). Please check your internet connection and try again."
+        : (err?.message ? `Network request failed: ${err.message}` : "Failed to connect to verification service.")
+    };
   }
 }

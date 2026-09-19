@@ -19,20 +19,40 @@ setGlobalDispatcher(
 
 const CANDIDATE_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash"];
 
+async function generateContentWithTimeout(ai: GoogleGenAI, model: string, contents: any[], config?: any, timeoutMs = 15000) {
+  let timer: any;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Model ${model} request timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+  });
+
+  try {
+    const response = await Promise.race([
+      ai.models.generateContent({ model, contents, config }),
+      timeoutPromise
+    ]);
+    clearTimeout(timer);
+    return response;
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
+}
+
 async function generateContentWithFallback(ai: GoogleGenAI, contents: any[], config?: any) {
   let lastError: any = null;
   for (const model of CANDIDATE_MODELS) {
+    const startCandidateTime = Date.now();
+    console.log(`[${new Date().toISOString()}] [server.ts] Trying candidate model: ${model}`);
     try {
-      const response = await ai.models.generateContent({
-        model,
-        contents,
-        config
-      });
+      const response: any = await generateContentWithTimeout(ai, model, contents, config, 15000);
       if (response && response.text) {
+        console.log(`[${new Date().toISOString()}] [server.ts] Model ${model} succeeded in ${Date.now() - startCandidateTime}ms`);
         return response;
       }
     } catch (err: any) {
-      console.warn(`Model ${model} failed (${err?.message || err}), trying candidate fallback...`);
+      console.warn(`[${new Date().toISOString()}] [server.ts] Model ${model} failed in ${Date.now() - startCandidateTime}ms (${err?.message || err}), trying candidate fallback...`);
       lastError = err;
     }
   }
@@ -47,7 +67,8 @@ function getGenAI(): GoogleGenAI {
   if (!genAIClient) {
     const key = process.env.GEMINI_API_KEY;
     if (!key) {
-      throw new Error("GEMINI_API_KEY environment variable is required");
+      console.error("[server.ts] CRITICAL: GEMINI_API_KEY environment variable is required");
+      throw new Error("GEMINI_API_KEY environment variable is required on server");
     }
     genAIClient = new GoogleGenAI({ apiKey: key });
   }

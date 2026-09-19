@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { collection, doc, updateDoc, increment, addDoc } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, auth, storage } from "../firebase";
 import { handleFirestoreError, OperationType } from "../lib/firestore-guard";
 import { Challenge } from "../types";
 import { motion } from "motion/react";
-import { X, Upload, CheckCircle2, AlertCircle } from "lucide-react";
+import { X, Upload, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { verifyEcoProof } from "../services/geminiService";
 import { updateStats } from "../lib/badge-utils";
@@ -20,94 +20,153 @@ interface ChallengeModalProps {
 export default function ChallengeModal({ challenge, onClose }: ChallengeModalProps) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [isProcessingImage, setIsProcessingImage] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [status, setStatus] = useState<"IDLE" | "VERIFYING" | "SUCCESS" | "ERROR">("IDLE");
   const [reason, setReason] = useState("");
+  const safetyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (safetyTimeoutRef.current) {
+        clearTimeout(safetyTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selected = e.target.files?.[0];
     if (selected) {
+      if (!selected.type.startsWith("image/")) {
+        toast.error("Please upload an image file (JPEG, PNG, WebP).");
+        return;
+      }
       setFile(selected);
+      setPreview(null);
+      setIsProcessingImage(true);
+
       const reader = new FileReader();
       reader.onloadend = async () => {
-        const raw = reader.result as string;
-        const compressed = await compressImagePayload(raw);
-        setPreview(compressed);
+        try {
+          const raw = reader.result as string;
+          const compressed = await compressImagePayload(raw);
+          setPreview(compressed);
+        } catch (err) {
+          console.error("Failed to compress image payload:", err);
+          setPreview(reader.result as string);
+        } finally {
+          setIsProcessingImage(false);
+        }
+      };
+      reader.onerror = () => {
+        setIsProcessingImage(false);
+        toast.error("Failed to read image file.");
       };
       reader.readAsDataURL(selected);
     }
   };
 
   const handleSubmit = async () => {
-    if (!file || !auth.currentUser) return;
+    if (!file || !preview || isProcessingImage || !auth.currentUser) {
+      if (!preview && isProcessingImage) {
+        toast.error("Please wait, image is still being optimized...");
+      }
+      return;
+    }
+
     setSubmitting(true);
     setStatus("VERIFYING");
 
+    // Outer 28-second fallback timeout guarantee
+    if (safetyTimeoutRef.current) clearTimeout(safetyTimeoutRef.current);
+    safetyTimeoutRef.current = setTimeout(() => {
+      console.warn("[ChallengeModal] Outer safety timeout triggered (28s).");
+      setStatus("ERROR");
+      setReason("Verification is taking longer than expected. Please check your network and try again.");
+      setSubmitting(false);
+    }, 28000);
+
     try {
-      // 1. Upload to Firebase Storage (with graceful fallback to data URL if storage is unavailable)
-      let downloadUrl = preview!;
-      try {
-        const storageRef = ref(storage, `completions/${auth.currentUser.uid}/${Date.now()}_${file.name}`);
-        const uploadResult = await uploadBytes(storageRef, file);
-        downloadUrl = await getDownloadURL(uploadResult.ref);
-      } catch (storageErr) {
-        console.warn("Firebase Storage upload failed or timed out; falling back to proof data URL:", storageErr);
-        downloadUrl = preview!;
+      // 1. Run AI Verification FIRST
+      console.log(`[${new Date().toISOString()}] [ChallengeModal] Starting AI verification for "${challenge.title}"`);
+      const result = await verifyEcoProof(preview, challenge.title, challenge.proofInstructions);
+      console.log(`[${new Date().toISOString()}] [ChallengeModal] AI verification finished:`, result);
+
+      if (!result.verified) {
+        setStatus("ERROR");
+        setReason(result.reason || "We couldn't verify your proof against the challenge criteria.");
+        toast.error("Verification not approved.");
+        return;
       }
 
-      // 2. AI Verification
-      const result = await verifyEcoProof(preview!, challenge.title, challenge.proofInstructions);
-      
-      // 3. Save Completion
+      // 2. Proof Verified! Attempt Firebase Storage upload with a strict 4-second timeout
+      let downloadUrl = preview;
+      try {
+        const uploadTask = async () => {
+          const storageRef = ref(storage, `completions/${auth.currentUser?.uid}/${Date.now()}_${file.name}`);
+          const uploadResult = await uploadBytes(storageRef, file);
+          return await getDownloadURL(uploadResult.ref);
+        };
+        const storageTimeout = new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error("Firebase Storage upload timed out")), 4000)
+        );
+        downloadUrl = await Promise.race([uploadTask(), storageTimeout]);
+      } catch (storageErr) {
+        console.warn("Storage upload skipped or timed out; using data URL fallback:", storageErr);
+        downloadUrl = preview;
+      }
+
+      // 3. Save Completion record
       const completionData = {
         userId: auth.currentUser.uid,
         challengeId: challenge.challengeId,
         proofUrl: downloadUrl,
         proofType: "IMAGE",
-        aiVerificationStatus: result.verified ? "VERIFIED" : "REJECTED",
+        aiVerificationStatus: "VERIFIED",
         aiVerificationScore: result.score,
-        pointsAwarded: result.verified ? challenge.points : 0,
-        isStreakDay: result.verified,
+        pointsAwarded: challenge.points,
+        isStreakDay: true,
         submittedAt: new Date().toISOString(),
-        verifiedAt: result.verified ? new Date().toISOString() : null,
+        verifiedAt: new Date().toISOString(),
         caption: "",
         likesCount: 0,
         commentsCount: 0
       };
 
-      await addDoc(collection(db, "completions"), completionData).catch(e => handleFirestoreError(e, OperationType.CREATE, "completions"));
+      await addDoc(collection(db, "completions"), completionData).catch(e => 
+        handleFirestoreError(e, OperationType.CREATE, "completions")
+      );
 
-      if (result.verified) {
-        // 4. Update User Points & Streak
-        const userRef = doc(db, "users", auth.currentUser.uid);
-        
-        const updateData = {
-          points: increment(challenge.points),
-          totalPoints: increment(challenge.points),
-          currentStreak: increment(1),
-          lastActivityDate: new Date().toISOString().split('T')[0]
-        };
+      // 4. Update User Points & Streak
+      const userRef = doc(db, "users", auth.currentUser.uid);
+      const updateData = {
+        points: increment(challenge.points),
+        totalPoints: increment(challenge.points),
+        currentStreak: increment(1),
+        lastActivityDate: new Date().toISOString().split('T')[0]
+      };
 
-        await updateDoc(userRef, updateData).catch(e => handleFirestoreError(e, OperationType.UPDATE, `users/${auth.currentUser?.uid}`));
-        
-        // Update badge stats
-        updateStats({
-          points: challenge.points,
-          proofs_submitted: 1
-        });
+      await updateDoc(userRef, updateData).catch(e => 
+        handleFirestoreError(e, OperationType.UPDATE, `users/${auth.currentUser?.uid}`)
+      );
+      
+      // Update badge stats
+      updateStats({
+        points: challenge.points,
+        proofs_submitted: 1
+      });
 
-        setStatus("SUCCESS");
-        toast.success(`Verified! +${challenge.points} points earned.`);
-      } else {
-        setStatus("ERROR");
-        setReason(result.reason);
-        toast.error("Verification failed. Please try again.");
-      }
-    } catch (error) {
-      console.error("Submission error:", error);
+      setStatus("SUCCESS");
+      toast.success(`Verified! +${challenge.points} points earned.`);
+    } catch (error: any) {
+      console.error("Submission error in ChallengeModal:", error);
       setStatus("ERROR");
-      setReason("Something went wrong. Please try again.");
+      setReason(error?.message || "An unexpected error occurred during submission. Please try again.");
     } finally {
+      if (safetyTimeoutRef.current) {
+        clearTimeout(safetyTimeoutRef.current);
+        safetyTimeoutRef.current = null;
+      }
       setSubmitting(false);
     }
   };
@@ -158,24 +217,30 @@ export default function ChallengeModal({ challenge, onClose }: ChallengeModalPro
               <div className="space-y-4">
                 <div 
                   className={cn(
-                    "border-2 border-dashed border-gray-200 rounded-2xl p-8 text-center transition-all",
+                    "border-2 border-dashed border-gray-200 rounded-2xl p-8 text-center transition-all min-h-[180px] flex items-center justify-center",
                     preview ? "border-primary bg-primary/5" : "hover:border-primary hover:bg-gray-50"
                   )}
                 >
-                  {preview ? (
-                    <div className="relative aspect-video rounded-xl overflow-hidden">
+                  {isProcessingImage ? (
+                    <div className="py-8 space-y-3">
+                      <Loader2 className="animate-spin mx-auto text-primary" size={36} />
+                      <p className="text-sm font-semibold text-text-secondary">Optimizing image resolution...</p>
+                    </div>
+                  ) : preview ? (
+                    <div className="relative aspect-video w-full rounded-xl overflow-hidden">
                       <img src={preview} className="w-full h-full object-cover" />
                       <button 
-                        onClick={() => {setFile(null); setPreview(null);}}
-                        className="absolute top-2 right-2 p-1 bg-red-500 text-white rounded-full"
+                        onClick={() => { setFile(null); setPreview(null); }}
+                        className="absolute top-2 right-2 p-1.5 bg-red-500 text-white rounded-full hover:bg-red-600 transition-colors shadow-md"
+                        title="Remove image"
                       >
                         <X size={16} />
                       </button>
                     </div>
                   ) : (
-                    <label className="cursor-pointer block">
+                    <label className="cursor-pointer block w-full py-4">
                       <Upload className="mx-auto text-gray-400 mb-4" size={48} />
-                      <p className="font-bold text-lg">Upload Proof</p>
+                      <p className="font-bold text-lg text-text-primary">Upload Proof</p>
                       <p className="text-sm text-text-secondary">Click to browse or drag and drop</p>
                       <input 
                         type="file" 
@@ -187,12 +252,17 @@ export default function ChallengeModal({ challenge, onClose }: ChallengeModalPro
                     </label>
                   )}
                 </div>
+
                 <button
-                  disabled={!file || submitting}
+                  disabled={!file || !preview || isProcessingImage || submitting}
                   onClick={handleSubmit}
-                  className="w-full py-4 bg-primary text-white rounded-xl font-bold hover:bg-primary-light transition-colors shadow-lg disabled:opacity-50"
+                  className="w-full py-4 bg-primary text-white rounded-xl font-bold hover:bg-primary-light transition-colors shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {submitting ? "Verifying..." : "Submit Proof"}
+                  {submitting
+                    ? "Verifying with AI..."
+                    : isProcessingImage
+                    ? "Optimizing image..."
+                    : "Submit Proof"}
                 </button>
               </div>
             )}
@@ -200,8 +270,8 @@ export default function ChallengeModal({ challenge, onClose }: ChallengeModalPro
             {status === "VERIFYING" && (
               <div className="text-center py-12 space-y-4">
                 <div className="w-16 h-16 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
-                <p className="text-xl font-bold">Verifying your proof...</p>
-                <p className="text-text-secondary">Our AI is checking your submission. This usually takes 5-10 seconds.</p>
+                <p className="text-xl font-bold text-text-primary">Verifying your proof with Gemini AI...</p>
+                <p className="text-text-secondary">Our AI is checking your submission against the challenge requirements.</p>
               </div>
             )}
 
@@ -221,8 +291,8 @@ export default function ChallengeModal({ challenge, onClose }: ChallengeModalPro
                 <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto">
                   <AlertCircle size={40} />
                 </div>
-                <p className="text-2xl font-bold">Verification Failed</p>
-                <p className="text-text-secondary">{reason || "We couldn't verify your proof. Please try again with a clearer image."}</p>
+                <p className="text-2xl font-bold text-text-primary">Verification Not Approved</p>
+                <p className="text-text-secondary max-w-md mx-auto">{reason || "We couldn't verify your proof. Please try again with a clearer image."}</p>
                 <button onClick={() => setStatus("IDLE")} className="px-8 py-3 bg-primary text-white rounded-xl font-bold">Try Again</button>
               </div>
             )}

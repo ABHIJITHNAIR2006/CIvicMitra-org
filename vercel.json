@@ -1,11 +1,19 @@
 {
   "rewrites": [
     {
+      "source": "/api/verify-proof",
+      "destination": "/api/verify-proof.js"
+    },
+    {
+      "source": "/api/screen-scan",
+      "destination": "/api/screen-scan.js"
+    },
+    {
       "source": "/api/health",
       "destination": "/api/health.js"
     },
     {
-      "source": "/(.*)",
+      "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
   ]
