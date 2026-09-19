@@ -1,0 +1,252 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields: uid, username, email, fullName, avatarUrl, bio, city, country, points, totalPoints, currentStreak, longestStreak, level, experiencePoints, role, lastActivityDate, createdAt, fcmToken
+    //
+    // Collection: challenges
+    // Fields: challengeId, title, description, shortDescription, category, difficulty, points, bonusPointsStreak, iconEmoji, bannerImageUrl, proofInstructions, isDaily, isActive
+    //
+    // Collection: completions
+    // Fields: userId, challengeId, proofUrl, proofType, caption, aiVerificationStatus, aiVerificationScore, pointsAwarded, isStreakDay, submittedAt, verifiedAt, likesCount, commentsCount
+    //
+    // Collection: events
+    // Fields: eventId, title, description, eventType, status, startDate, endDate, location, bonusPoints
+    //
+    // Collection: notifications
+    // Fields: userId, type, title, message, isRead, createdAt, actionUrl
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "arcadeabhi6@gmail.com" ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN'));
+    }
+
+    match /connection_test/{docId} {
+      allow read: if true;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidUrl(url) {
+      return url is string && (url.matches("^https://.*") || url.matches("^http://.*") || url.matches("^data:image/.*"));
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}.*");
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'username', 'email']) &&
+             data.uid is string && data.uid.size() > 0 &&
+             data.username is string && data.username.size() >= 2 && data.username.size() <= 50 &&
+             data.email is string && isValidEmail(data.email) &&
+             (!('role' in data) || data.role in ['USER', 'MODERATOR', 'ADMIN']) &&
+             (!('fullName' in data) || (data.fullName is string && data.fullName.size() <= 100)) &&
+             (!('avatarUrl' in data) || isValidUrl(data.avatarUrl)) &&
+             (!('bio' in data) || (data.bio is string && data.bio.size() <= 500)) &&
+             (!('points' in data) || data.points is int) &&
+             (!('totalPoints' in data) || data.totalPoints is int) &&
+             (!('currentStreak' in data) || data.currentStreak is int);
+    }
+
+    function isValidCompletion(data) {
+      return hasRequiredFields(['userId', 'challengeId', 'proofUrl', 'aiVerificationStatus']) &&
+             data.userId == request.auth.uid &&
+             data.challengeId is string &&
+             data.proofUrl is string && data.proofUrl.size() < 1048576 && // 1MB limit for Firestore doc
+             data.aiVerificationStatus in ['PENDING', 'VERIFIED', 'REJECTED', 'MANUAL_REVIEW'] &&
+             (!('pointsAwarded' in data) || data.pointsAwarded is int) &&
+             (!('submittedAt' in data) || isValidDateString(data.submittedAt)) &&
+             (!('likesCount' in data) || data.likesCount is int) &&
+             (!('commentsCount' in data) || data.commentsCount is int);
+    }
+
+    function isValidChallenge(data) {
+      return hasRequiredFields(['challengeId', 'title', 'description', 'category', 'difficulty', 'points']) &&
+             data.challengeId is string && data.challengeId.size() > 0 &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 100 &&
+             data.description is string && data.description.size() > 0 && data.description.size() <= 2000 &&
+             data.category in ['WATER', 'ENERGY', 'TRANSPORT', 'WASTE', 'FOOD', 'COMMUNITY', 'NATURE'] &&
+             data.difficulty in ['EASY', 'MEDIUM', 'HARD'] &&
+             data.points is int && data.points >= 0 &&
+             (!('shortDescription' in data) || (data.shortDescription is string && data.shortDescription.size() <= 200)) &&
+             (!('iconEmoji' in data) || (data.iconEmoji is string && data.iconEmoji.size() <= 10)) &&
+             (!('bannerImageUrl' in data) || isValidUrl(data.bannerImageUrl)) &&
+             (!('proofInstructions' in data) || (data.proofInstructions is string && data.proofInstructions.size() <= 1000)) &&
+             (!('isDaily' in data) || data.isDaily is bool) &&
+             (!('isActive' in data) || data.isActive is bool);
+    }
+
+    function isValidEvent(data) {
+      return hasRequiredFields(['eventId', 'title', 'description']) &&
+             data.eventId is string && data.eventId.size() > 0 &&
+             data.title is string && data.title.size() > 0 &&
+             data.description is string &&
+             // Flexible fields to support both "type" and "eventType"
+             (
+               ('eventType' in data && data.eventType is string) || 
+               ('type' in data && data.type is string)
+             ) &&
+             // Flexible date fields
+             (
+               ('startDate' in data && isValidDateString(data.startDate)) || 
+               ('date' in data && isValidDateString(data.date))
+             ) &&
+             // Flexible location
+             (
+               ('location' in data && (data.location is string || data.location is map))
+             ) &&
+             (!('status' in data) || data.status in ['UPCOMING', 'ONGOING', 'COMPLETED', 'CANCELLED']) &&
+             (!('endDate' in data) || data.endDate == "" || isValidDateString(data.endDate)) &&
+             (!('bonusPoints' in data) || data.bonusPoints is int || data.bonusPoints is float || (data.bonusPoints == 0)) &&
+             (!('points' in data) || data.points is int || data.points is float || (data.points == 0)) &&
+             (!('category' in data) || data.category is string) &&
+             (!('shortDescription' in data) || data.shortDescription is string) &&
+             (!('isActive' in data) || data.isActive is bool) &&
+             (!('isFeatured' in data) || data.isFeatured is bool) &&
+             (!('registrationDeadline' in data) || data.registrationDeadline == "" || isValidDateString(data.registrationDeadline)) &&
+             (!('maxParticipants' in data) || data.maxParticipants is int) &&
+             (!('iconEmoji' in data) || data.iconEmoji is string) &&
+             (!('bannerImageUrl' in data) || isValidUrl(data.bannerImageUrl)) &&
+             (!('proofInstructions' in data) || data.proofInstructions is string) &&
+             (!('createdAt' in data) || isValidDateString(data.createdAt));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow get: if isAuthenticated();
+      allow list: if isAuthenticated(); // Needed for join_order calculation
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && 
+                       (request.resource.data.role == 'USER' || isAdmin());
+      allow update: if (isOwner(userId) && 
+                       isValidUser(request.resource.data) && 
+                       request.resource.data.role == resource.data.role &&
+                       request.resource.data.uid == resource.data.uid &&
+                       request.resource.data.email == resource.data.email) || isAdmin();
+      
+      match /badges/{badgeId} {
+        allow read: if isAuthenticated();
+        allow write: if isAdmin();
+      }
+    }
+
+    match /event_registrations/{registrationId} {
+      allow read: if isAuthenticated() && (resource.data.email == request.auth.token.email || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.email == request.auth.token.email;
+      allow update, delete: if isAdmin();
+    }
+
+    match /event_participants_public/{participantId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid &&
+                       !('email' in request.resource.data) &&
+                       !('phone' in request.resource.data);
+      allow update, delete: if isAdmin();
+    }
+
+    match /challenges/{challengeId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdmin() && isValidChallenge(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /completions/{completionId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidCompletion(request.resource.data);
+      allow update: if (isAdmin() && 
+                       request.resource.data.userId == resource.data.userId &&
+                       request.resource.data.challengeId == resource.data.challengeId) ||
+                       (isAuthenticated() && 
+                        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount', 'commentsCount']) &&
+                        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['likesCount']) || 
+                          (request.resource.data.likesCount == resource.data.likesCount + 1 || 
+                           request.resource.data.likesCount == resource.data.likesCount - 1)) &&
+                        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['commentsCount']) || 
+                          (request.resource.data.commentsCount == resource.data.commentsCount + 1 || 
+                           request.resource.data.commentsCount == resource.data.commentsCount - 1)));
+      allow delete: if isAdmin();
+
+      match /likes/{userId} {
+        allow read: if isAuthenticated();
+        allow write: if isOwner(userId);
+      }
+
+      match /comments/{commentId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() && 
+                         request.resource.data.userId == request.auth.uid &&
+                         request.resource.data.text is string &&
+                         request.resource.data.text.size() > 0 &&
+                         request.resource.data.text.size() <= 500;
+        allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      }
+    }
+
+    match /events/{eventId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAdmin() && isValidEvent(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /quiz_questions/{questionId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /quiz_attempts/{attemptId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid &&
+                       request.resource.data.score >= 0 && 
+                       request.resource.data.score <= 50;
+      allow update: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAdmin();
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid && 
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    match /screenScans/{scanId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if false;
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+  }
+}

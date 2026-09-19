@@ -1,0 +1,173 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and stats",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string" },
+        "email": { "type": "string" },
+        "fullName": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "bio": { "type": "string" },
+        "city": { "type": "string" },
+        "country": { "type": "string" },
+        "points": { "type": "integer" },
+        "totalPoints": { "type": "integer" },
+        "currentStreak": { "type": "integer" },
+        "longestStreak": { "type": "integer" },
+        "level": { "type": "integer" },
+        "experiencePoints": { "type": "integer" },
+        "role": { "type": "string", "enum": ["USER", "MODERATOR", "ADMIN"] },
+        "lastActivityDate": { "type": "string", "format": "date" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "fcmToken": { "type": "string" }
+      },
+      "required": ["uid", "username", "email"]
+    },
+    "Challenge": {
+      "title": "Challenge",
+      "description": "Eco challenge definition",
+      "type": "object",
+      "properties": {
+        "challengeId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "shortDescription": { "type": "string" },
+        "category": { "type": "string", "enum": ["WATER", "ENERGY", "TRANSPORT", "WASTE", "FOOD", "COMMUNITY", "NATURE"] },
+        "difficulty": { "type": "string", "enum": ["EASY", "MEDIUM", "HARD"] },
+        "points": { "type": "integer" },
+        "bonusPointsStreak": { "type": "integer" },
+        "iconEmoji": { "type": "string" },
+        "bannerImageUrl": { "type": "string" },
+        "proofInstructions": { "type": "string" },
+        "isDaily": { "type": "boolean" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["challengeId", "title", "category", "points"]
+    },
+    "Completion": {
+      "title": "Completion",
+      "description": "User challenge completion proof",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "challengeId": { "type": "string" },
+        "proofUrl": { "type": "string" },
+        "proofType": { "type": "string", "enum": ["IMAGE", "VIDEO"] },
+        "caption": { "type": "string" },
+        "aiVerificationStatus": { "type": "string", "enum": ["PENDING", "VERIFIED", "REJECTED", "MANUAL_REVIEW"] },
+        "aiVerificationScore": { "type": "number" },
+        "pointsAwarded": { "type": "integer" },
+        "isStreakDay": { "type": "boolean" },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "verifiedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "challengeId", "proofUrl", "aiVerificationStatus"]
+    },
+    "Badge": {
+      "title": "Badge",
+      "description": "Earned badge",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "badgeId": { "type": "string" },
+        "badgeName": { "type": "string" },
+        "badgeIconUrl": { "type": "string" },
+        "earnedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "badgeId", "earnedAt"]
+    },
+    "Event": {
+      "title": "Event",
+      "description": "Community event",
+      "type": "object",
+      "properties": {
+        "eventId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "eventType": { "type": "string" },
+        "status": { "type": "string" },
+        "startDate": { "type": "string", "format": "date-time" },
+        "endDate": { "type": "string", "format": "date-time" },
+        "location": { "type": "object" },
+        "bonusPoints": { "type": "integer" }
+      },
+      "required": ["eventId", "title", "startDate"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "User notification",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "type": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "title", "message", "isRead", "createdAt"]
+    },
+    "QuizQuestion": {
+      "title": "QuizQuestion",
+      "description": "Daily quiz question",
+      "type": "object",
+      "properties": {
+        "question": { "type": "string" },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "correctAnswer": { "type": "integer" },
+        "difficulty": { "type": "string", "enum": ["easy", "medium", "hard"] }
+      },
+      "required": ["question", "options", "correctAnswer", "difficulty"]
+    },
+    "QuizAttempt": {
+      "title": "QuizAttempt",
+      "description": "User quiz attempt",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "score": { "type": "integer" },
+        "answers": { "type": "array", "items": { "type": "integer" } },
+        "submittedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "date", "score", "submittedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/challenges/{challengeId}": {
+      "schema": "Challenge",
+      "description": "Challenge catalog"
+    },
+    "/completions/{completionId}": {
+      "schema": "Completion",
+      "description": "User challenge completions"
+    },
+    "/users/{userId}/badges/{badgeId}": {
+      "schema": "Badge",
+      "description": "User earned badges"
+    },
+    "/events/{eventId}": {
+      "schema": "Event",
+      "description": "Community events"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User notifications"
+    },
+    "/quiz_questions/{questionId}": {
+      "schema": "QuizQuestion",
+      "description": "Quiz questions pool"
+    },
+    "/quiz_attempts/{attemptId}": {
+      "schema": "QuizAttempt",
+      "description": "User quiz attempts"
+    }
+  }
+}
