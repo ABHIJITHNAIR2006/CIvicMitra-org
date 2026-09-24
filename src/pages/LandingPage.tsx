@@ -39,7 +39,7 @@ export default function LandingPage() {
           className="z-10 max-w-4xl"
         >
           <h1 className="text-6xl md:text-8xl mb-6 tracking-tight">
-            Small habits. <span className="text-primary">Big planet.</span>
+            NewBig habits. <span className="text-primary">Big planet.</span>
           </h1>
           <p className="text-xl md:text-2xl text-text-secondary mb-10 max-w-2xl mx-auto">
             Turn sustainable living into a game. Complete challenges, earn points, and save the world one habit at a time.
