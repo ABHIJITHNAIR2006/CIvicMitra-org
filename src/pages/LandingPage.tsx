@@ -1,8 +1,31 @@
+import { useState, useEffect } from "react";
 import { motion } from "motion/react";
 import { Link } from "react-router-dom";
-import { Leaf, Shield, Trophy, Users, Zap, Droplets } from "lucide-react";
+import { Leaf, Trophy, Users, Zap, Calendar } from "lucide-react";
 
 export default function LandingPage() {
+  // State for live date display
+  const [currentDate, setCurrentDate] = useState<string>("");
+
+  useEffect(() => {
+    // Format current date e.g., "Thursday, September 24, 2026"
+    const updateDate = () => {
+      const options: Intl.DateTimeFormatOptions = {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      };
+      setCurrentDate(new Date().toLocaleDateString(undefined, options));
+    };
+
+    updateDate();
+    
+    // Check every hour if the day changed (in case page stays open overnight)
+    const timer = setInterval(updateDate, 1000 * 60 * 60);
+    return () => clearInterval(timer);
+  }, []);
+
   return (
     <div className="min-h-screen bg-background overflow-hidden">
       {/* Hero Section */}
@@ -38,9 +61,27 @@ export default function LandingPage() {
           animate={{ opacity: 1, y: 0 }}
           className="z-10 max-w-4xl"
         >
+          {/* Current Date Widget Added Here */}
+          {currentDate && (
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: 0.1 }}
+              className="inline-flex items-center gap-2.5 px-4 py-2 rounded-full bg-card/80 backdrop-blur-md border border-primary/15 shadow-sm mb-8 text-sm font-medium text-text-secondary"
+            >
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+              </span>
+              <Calendar size={15} className="text-primary" />
+              <span>{currentDate}</span>
+            </motion.div>
+          )}
+
           <h1 className="text-6xl md:text-8xl mb-6 tracking-tight">
-            NewBig habits. <span className="text-primary">Big planet.</span>
+            Small habits. <span className="text-primary">Big planet.</span>
           </h1>
+
           <p className="text-xl md:text-2xl text-text-secondary mb-10 max-w-2xl mx-auto">
             Turn sustainable living into a game. Complete challenges, earn points, and save the world one habit at a time.
           </p>
