@@ -1,0 +1,19 @@
+name: Sync to Org Repo
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to org repo
+        run: |
+          git remote add org https://x-access-token:${{ secrets.ORG_REPO_TOKEN }}@github.com/Project-Based-Learning-Project/CivicMitra.git
+          git push org main --force
