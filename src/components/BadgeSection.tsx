@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from "react";
-import { BADGES, getUserBadges, getStats, BadgeCategory, Badge } from "../lib/badge-utils";
+import { BADGES, BadgeCategory, Badge } from "../lib/badge-utils";
+import { useBadges } from "../hooks/useBadges";
 import BadgeCard from "./BadgeCard";
 import { Trophy, Filter, LayoutGrid, Award, Star, Zap, Calendar, Camera, Sparkles } from "lucide-react";
 import { cn } from "../lib/utils";
@@ -9,8 +10,7 @@ export default function BadgeSection() {
   const [activeFilter, setActiveFilter] = useState<"all" | "earned" | "locked">("all");
   const [activeCategory, setActiveCategory] = useState<BadgeCategory | "all">("all");
   
-  const stats = getStats();
-  const userBadges = getUserBadges();
+  const { stats, userBadges } = useBadges();
   const earnedIds = userBadges.earned.map(b => b.id);
 
   const filteredBadges = useMemo(() => {

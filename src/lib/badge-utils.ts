@@ -1,4 +1,5 @@
 import { LEVELS, getCurrentLevel } from "./level-utils";
+import { auth } from "../firebase";
 
 export type BadgeRarity = "common" | "uncommon" | "rare" | "epic" | "legendary";
 export type BadgeCategory = "citizenship" | "eco" | "quiz" | "events" | "proof" | "special";
@@ -88,7 +89,35 @@ export const BADGES: Badge[] = [
   { id: "lucky_streak", name: "Lucky Streak", emoji: "🎰", category: "special", rarity: "legendary", description: "Score perfect on quiz twice in a row", requirement: 2, requirementType: "consecutive_perfect_quizzes" },
 ];
 
-export const getStats = (): UserStats => {
+const getStatsStorageKey = (userId?: string | null): string | null => {
+  const uid = userId || auth.currentUser?.uid;
+  return uid ? `user_stats_${uid}` : null;
+};
+
+const getBadgesStorageKey = (userId?: string | null): string | null => {
+  const uid = userId || auth.currentUser?.uid;
+  return uid ? `user_badges_${uid}` : null;
+};
+
+export const clearLegacyBadgeStorage = () => {
+  try {
+    localStorage.removeItem("user_stats");
+    localStorage.removeItem("user_badges");
+    localStorage.removeItem("user_level");
+  } catch {
+    // ignore
+  }
+};
+
+export const clearUserBadgeData = (userId?: string | null) => {
+  clearLegacyBadgeStorage();
+  const statsKey = getStatsStorageKey(userId);
+  const badgesKey = getBadgesStorageKey(userId);
+  if (statsKey) localStorage.removeItem(statsKey);
+  if (badgesKey) localStorage.removeItem(badgesKey);
+};
+
+export const getStats = (userId?: string | null): UserStats => {
   const defaultStats: UserStats = {
     points: 0,
     quizzes_completed: 0,
@@ -101,24 +130,34 @@ export const getStats = (): UserStats => {
     join_order: 100, // Default high number
   };
   
-  const stored = localStorage.getItem("user_stats");
+  clearLegacyBadgeStorage();
+
+  const key = getStatsStorageKey(userId);
+  if (!key) return defaultStats;
+
+  const stored = localStorage.getItem(key);
   if (!stored) return defaultStats;
   
-  const stats = JSON.parse(stored) as UserStats;
-  
-  // Reset daily points if date changed
-  const today = new Date().toISOString().split('T')[0];
-  if (stats.today_date !== today) {
-    stats.points_earned_today = 0;
-    stats.today_date = today;
-    localStorage.setItem("user_stats", JSON.stringify(stats));
+  try {
+    const stats = JSON.parse(stored) as UserStats;
+    
+    // Reset daily points if date changed
+    const today = new Date().toISOString().split('T')[0];
+    if (stats.today_date !== today) {
+      stats.points_earned_today = 0;
+      stats.today_date = today;
+      localStorage.setItem(key, JSON.stringify(stats));
+    }
+    
+    return stats;
+  } catch {
+    return defaultStats;
   }
-  
-  return stats;
 };
 
-export const updateStats = (updates: Partial<UserStats>) => {
-  const current = getStats();
+export const updateStats = (updates: Partial<UserStats>, userId?: string | null) => {
+  const key = getStatsStorageKey(userId);
+  const current = getStats(userId);
   const updated = { ...current, ...updates };
   
   // Handle points earned today
@@ -129,24 +168,38 @@ export const updateStats = (updates: Partial<UserStats>) => {
     }
   }
   
-  localStorage.setItem("user_stats", JSON.stringify(updated));
+  if (key) {
+    localStorage.setItem(key, JSON.stringify(updated));
+  }
   return updated;
 };
 
-export const getUserBadges = (): UserBadges => {
+export const getUserBadges = (userId?: string | null): UserBadges => {
   const defaultBadges: UserBadges = {
     earned: [],
     seen_animations: [],
   };
   
-  const stored = localStorage.getItem("user_badges");
+  clearLegacyBadgeStorage();
+
+  const key = getBadgesStorageKey(userId);
+  if (!key) return defaultBadges;
+
+  const stored = localStorage.getItem(key);
   if (!stored) return defaultBadges;
   
-  return JSON.parse(stored) as UserBadges;
+  try {
+    return JSON.parse(stored) as UserBadges;
+  } catch {
+    return defaultBadges;
+  }
 };
 
-export const awardBadge = (badgeId: string) => {
-  const userBadges = getUserBadges();
+export const awardBadge = (badgeId: string, userId?: string | null) => {
+  const key = getBadgesStorageKey(userId);
+  if (!key) return false;
+
+  const userBadges = getUserBadges(userId);
   const badge = BADGES.find(b => b.id === badgeId);
   
   if (!badge || userBadges.earned.some(b => b.id === badgeId)) return false;
@@ -161,21 +214,30 @@ export const awardBadge = (badgeId: string) => {
   };
   
   userBadges.earned.push(newEarned);
-  localStorage.setItem("user_badges", JSON.stringify(userBadges));
+  localStorage.setItem(key, JSON.stringify(userBadges));
   return true;
 };
 
-export const markAnimationSeen = (badgeId: string) => {
-  const userBadges = getUserBadges();
+export const markAnimationSeen = (badgeId: string, userId?: string | null) => {
+  const key = getBadgesStorageKey(userId);
+  if (!key) return;
+
+  const userBadges = getUserBadges(userId);
   if (!userBadges.seen_animations.includes(badgeId)) {
     userBadges.seen_animations.push(badgeId);
-    localStorage.setItem("user_badges", JSON.stringify(userBadges));
+    localStorage.setItem(key, JSON.stringify(userBadges));
   }
 };
 
-export const checkAndAwardBadges = (stats: UserStats): string[] => {
+export const checkAndAwardBadges = (stats: UserStats, userId?: string | null): string[] => {
+  // New users with 0 points and 0 activity MUST have all badges locked!
+  const hasAnyActivity = stats.points > 0 || stats.quizzes_completed > 0 || stats.events_registered > 0 || stats.proofs_submitted > 0;
+  if (!hasAnyActivity) {
+    return [];
+  }
+
   const newlyEarned: string[] = [];
-  const userBadges = getUserBadges();
+  const userBadges = getUserBadges(userId);
   const alreadyEarned = userBadges.earned.map(b => b.id);
 
   const award = (id: string) => {
@@ -223,7 +285,7 @@ export const checkAndAwardBadges = (stats: UserStats): string[] => {
   if (stats.proofs_submitted >= 10) award("diamond_submitter");
 
   // Special
-  if (stats.join_order <= 10) award("early_adopter");
+  if (stats.join_order <= 10 && hasAnyActivity) award("early_adopter");
   if (stats.points_earned_today >= 100) award("speed_demon");
   
   const currentLevel = getCurrentLevel(stats.points);
@@ -236,12 +298,12 @@ export const checkAndAwardBadges = (stats: UserStats): string[] => {
   if (earnedCitizenshipCount === citizenshipBadgeIds.length) award("heart_of_gold");
 
   // Actually award them
-  newlyEarned.forEach(id => awardBadge(id));
+  newlyEarned.forEach(id => awardBadge(id, userId));
 
   return newlyEarned;
 };
 
-export const getBadgeProgress = (badgeId: string, stats: UserStats): { current: number; target: number; percentage: number } => {
+export const getBadgeProgress = (badgeId: string, stats: UserStats, userId?: string | null): { current: number; target: number; percentage: number } => {
   const badge = BADGES.find(b => b.id === badgeId);
   if (!badge) return { current: 0, target: 0, percentage: 0 };
 
@@ -272,17 +334,16 @@ export const getBadgeProgress = (badgeId: string, stats: UserStats): { current: 
       break;
     case "special":
       if (badge.id === "early_adopter") {
-        current = stats.join_order <= 10 ? 10 : 0;
+        current = stats.join_order <= 10 && (stats.points > 0 || stats.quizzes_completed > 0) ? 10 : 0;
         target = 10;
       } else if (badge.id === "speed_demon") {
         current = stats.points_earned_today;
       } else if (badge.id === "heart_of_gold") {
         const citizenshipBadgeIds = ["bronze_citizen", "good_citizen", "active_citizen", "responsible_citizen", "dedicated_citizen", "elite_citizen", "legend_citizen", "supreme_citizen"];
-        const earned = getUserBadges().earned.map(b => b.id);
+        const earned = getUserBadges(userId).earned.map(b => b.id);
         current = earned.filter(id => citizenshipBadgeIds.includes(id)).length;
         target = citizenshipBadgeIds.length;
       } else if (badge.id === "quick_thinker") {
-        // This is a one-time score check, hard to show progress
         current = 0;
         target = 40;
       }
@@ -308,12 +369,12 @@ export const getRarityStyles = (rarity: BadgeRarity) => {
   }
 };
 
-export const syncBadgesWithFirestorePoints = (firestorePoints: number) => {
+export const syncBadgesWithFirestorePoints = (firestorePoints: number, userId?: string | null) => {
   if (typeof firestorePoints !== "number" || isNaN(firestorePoints)) return;
-  const current = getStats();
+  const current = getStats(userId);
   if (firestorePoints > current.points) {
-    const updated = updateStats({ points: firestorePoints });
-    checkAndAwardBadges(updated);
+    const updated = updateStats({ points: firestorePoints }, userId);
+    checkAndAwardBadges(updated, userId);
   }
 };
 

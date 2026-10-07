@@ -26,7 +26,8 @@ import { db } from "../firebase";
 import { Role } from "../types";
 import { useEventData } from "../lib/event-registration-utils";
 import { getCurrentLevel } from "../lib/level-utils";
-import { getUserBadges, syncBadgesWithFirestorePoints } from "../lib/badge-utils";
+import { clearLegacyBadgeStorage, clearUserBadgeData, syncBadgesWithFirestorePoints } from "../lib/badge-utils";
+import { useBadges } from "../hooks/useBadges";
 import { checkIsAdmin } from "../lib/auth-utils";
 import AIScreenScanner from "../components/AIScreenScanner";
 
@@ -49,7 +50,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const location = useLocation();
   const navigate = useNavigate();
   const { submissions } = useEventData();
-  const userBadges = getUserBadges();
+  const { userBadges } = useBadges();
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -73,7 +74,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           const userData = userDoc.data();
           const pts = userData.points || 0;
           setFirestorePoints(pts);
-          syncBadgesWithFirestorePoints(pts);
+          syncBadgesWithFirestorePoints(pts, user.uid);
           setUserName(userData.fullName || userData.username || user.displayName);
           if (checkIsAdmin(userData.role, user.email)) {
             setIsAdmin(true);
@@ -106,6 +107,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     : baseNavItems;
 
   const handleLogout = async () => {
+    const uid = auth.currentUser?.uid;
+    clearLegacyBadgeStorage();
+    if (uid) {
+      clearUserBadgeData(uid);
+    }
+    sessionStorage.removeItem("level_shown_this_session");
     await signOut(auth);
     navigate("/login");
   };

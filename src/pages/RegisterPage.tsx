@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { createUserWithEmailAndPassword } from "firebase/auth";
-import { doc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db } from "../firebase";
 import { signInWithGoogle } from "../lib/auth-utils";
 import { handleFirestoreError, OperationType } from "../lib/firestore-guard";
 import { syncUserToAllUsers, setCurrentSocialUser } from "../lib/social-utils";
+import { clearLegacyBadgeStorage, clearUserBadgeData } from "../lib/badge-utils";
 import { toast } from "react-hot-toast";
 import { motion } from "motion/react";
 import { UserPlus, Mail, Lock, User, MapPin } from "lucide-react";
@@ -26,17 +27,50 @@ export default function RegisterPage() {
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+
+    const normalizedUsername = formData.username.trim().toLowerCase();
+    const normalizedEmail = formData.email.trim().toLowerCase();
+
+    if (!normalizedUsername) {
+      toast.error("Please enter a username");
+      setLoading(false);
+      return;
+    }
+
+    if (!normalizedEmail) {
+      toast.error("Please enter an email");
+      setLoading(false);
+      return;
+    }
+
     try {
-      const userCredential = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
+      // 1. Check username uniqueness
+      const usernameDoc = await getDoc(doc(db, "usernames", normalizedUsername)).catch(e => {
+        console.error("Username check failed:", e);
+        return null;
+      });
+
+      if (usernameDoc && usernameDoc.exists()) {
+        toast.error("Username already taken");
+        setLoading(false);
+        return;
+      }
+
+      // 2. Create Auth user
+      const userCredential = await createUserWithEmailAndPassword(auth, normalizedEmail, formData.password);
       const user = userCredential.user;
 
-      // Create user profile in Firestore
+      // 3. Clear any legacy badges from previous users
+      clearLegacyBadgeStorage();
+      clearUserBadgeData(user.uid);
+
+      // 4. Create user profile in Firestore
       const userProfile = {
         uid: user.uid,
-        username: formData.username,
-        email: formData.email,
-        fullName: formData.fullName,
-        city: formData.city,
+        username: normalizedUsername,
+        email: normalizedEmail,
+        fullName: formData.fullName.trim(),
+        city: formData.city.trim(),
         country: formData.country,
         points: 0,
         totalPoints: 0,
@@ -50,6 +84,12 @@ export default function RegisterPage() {
 
       await setDoc(doc(db, "users", user.uid), userProfile).catch(e => handleFirestoreError(e, OperationType.CREATE, `users/${user.uid}`));
 
+      // 5. Create username mapping in public usernames collection
+      await setDoc(doc(db, "usernames", normalizedUsername), {
+        uid: user.uid,
+        email: normalizedEmail
+      }).catch(e => handleFirestoreError(e, OperationType.CREATE, `usernames/${normalizedUsername}`));
+
       // Sync to social state
       setCurrentSocialUser(userProfile);
 
@@ -58,8 +98,16 @@ export default function RegisterPage() {
     } catch (error: any) {
       console.error("Registration Error:", error);
       let message = "Failed to register";
-      if (error.code === 'auth/operation-not-allowed') {
+      if (error.code === 'auth/email-already-in-use') {
+        message = "An account with this email already exists.";
+      } else if (error.code === 'auth/invalid-email') {
+        message = "Please enter a valid email address.";
+      } else if (error.code === 'auth/weak-password') {
+        message = "Password should be at least 6 characters long.";
+      } else if (error.code === 'auth/operation-not-allowed') {
         message = "Email/Password sign-in is not enabled in your Firebase Console. Please enable it in Authentication > Sign-in method.";
+      } else if (error.code === 'auth/network-request-failed') {
+        message = "Network error. Please check your internet connection.";
       } else {
         message = error.message || message;
       }

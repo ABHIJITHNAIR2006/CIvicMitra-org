@@ -1,16 +1,17 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { signInWithEmailAndPassword } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db } from "../firebase";
-import { signInWithGoogle } from "../lib/auth-utils";
+import { signInWithGoogle, checkIsAdmin } from "../lib/auth-utils";
 import { setCurrentSocialUser } from "../lib/social-utils";
 import { toast } from "react-hot-toast";
 import { motion } from "motion/react";
-import { LogIn, Mail, Lock, Eye, EyeOff } from "lucide-react";
+import { LogIn, User, Lock, Eye, EyeOff } from "lucide-react";
+import { Role } from "../types";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -19,25 +20,124 @@ export default function LoginPage() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+
+    const cleanIdentifier = identifier.trim().toLowerCase();
+    const cleanPassword = password;
+
+    if (!cleanIdentifier) {
+      toast.error("Please enter your username or email");
+      setLoading(false);
+      return;
+    }
+
+    if (!cleanPassword) {
+      toast.error("Please enter your password");
+      setLoading(false);
+      return;
+    }
+
     try {
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      const user = userCredential.user;
-      
-      // Fetch profile to sync
-      const userSnap = await getDoc(doc(db, "users", user.uid));
-      if (userSnap.exists()) {
-        setCurrentSocialUser(userSnap.data());
-      } else {
-        setCurrentSocialUser({ uid: user.uid, email: user.email, username: user.email?.split('@')[0] });
+      let resolvedEmail = cleanIdentifier;
+
+      if (!cleanIdentifier.includes("@")) {
+        // Resolve username to email from the public usernames collection
+        const usernameSnap = await getDoc(doc(db, "usernames", cleanIdentifier)).catch((err) => {
+          console.error("Error looking up username:", err);
+          return null;
+        });
+
+        if (!usernameSnap || !usernameSnap.exists()) {
+          toast.error("Username not found");
+          setLoading(false);
+          return;
+        }
+
+        const data = usernameSnap.data();
+        if (!data?.email) {
+          toast.error("Username not found");
+          setLoading(false);
+          return;
+        }
+
+        resolvedEmail = data.email.toLowerCase().trim();
       }
+
+      // Sign in with Firebase Auth
+      const userCredential = await signInWithEmailAndPassword(auth, resolvedEmail, cleanPassword);
+      const user = userCredential.user;
+
+      // Ensure /users/{uid} profile exists before navigating to /dashboard
+      const userDocRef = doc(db, "users", user.uid);
+      const userDoc = await getDoc(userDocRef).catch((e) => {
+        console.error("User profile fetch failed:", e);
+        return null;
+      });
+
+      let userProfileData: any = null;
+
+      if (!userDoc || !userDoc.exists()) {
+        const username = (cleanIdentifier.includes("@") ? (user.email?.split('@')[0] || `user_${user.uid.slice(0, 5)}`) : cleanIdentifier).toLowerCase();
+        const isAdmin = checkIsAdmin(null, user.email);
+
+        userProfileData = {
+          uid: user.uid,
+          username: username,
+          email: (user.email || resolvedEmail).toLowerCase().trim(),
+          fullName: user.displayName || "Eco Warrior",
+          city: "Unknown",
+          country: "India",
+          points: 0,
+          totalPoints: 0,
+          currentStreak: 0,
+          longestStreak: 0,
+          level: 1,
+          experiencePoints: 0,
+          role: isAdmin ? Role.ADMIN : Role.USER,
+          createdAt: new Date().toISOString()
+        };
+
+        await setDoc(userDocRef, userProfileData).catch((e) => {
+          console.error("Failed to create fallback user profile:", e);
+        });
+      } else {
+        userProfileData = userDoc.data();
+      }
+
+      // One-time backfill of usernames/{username} if it doesn't exist
+      const effectiveUsername = (userProfileData?.username || user.email?.split('@')[0] || "").toLowerCase().trim();
+      if (effectiveUsername) {
+        const unameCheck = await getDoc(doc(db, "usernames", effectiveUsername)).catch(() => null);
+        if (!unameCheck || !unameCheck.exists()) {
+          await setDoc(doc(db, "usernames", effectiveUsername), {
+            uid: user.uid,
+            email: (user.email || resolvedEmail).toLowerCase().trim()
+          }).catch((e) => console.warn("Backfill usernames doc failed:", e));
+        }
+      }
+
+      setCurrentSocialUser(userProfileData || { uid: user.uid, email: user.email, username: effectiveUsername });
 
       toast.success("Welcome back!");
       navigate("/dashboard");
     } catch (error: any) {
       console.error("Login Error:", error);
       let message = "Failed to login";
-      if (error.code === 'auth/operation-not-allowed') {
+      if (
+        error.code === 'auth/invalid-credential' ||
+        error.code === 'auth/user-not-found' ||
+        error.code === 'auth/wrong-password'
+      ) {
+        message = "Incorrect username or password";
+      } else if (error.code === 'auth/too-many-requests') {
+        message = "Too many failed attempts. Please try again later.";
+      } else if (error.code === 'auth/network-request-failed') {
+        message = "Network error. Please check your internet connection.";
+      } else if (error.code === 'auth/operation-not-allowed') {
         message = "Email/Password sign-in is not enabled in your Firebase Console. Please enable it in Authentication > Sign-in method.";
+      } else if (error.code === 'auth/invalid-email') {
+        message = "Invalid email format.";
+      } else if (error.message?.includes("Username not found")) {
+        message = "Username not found";
       } else {
         message = error.message || message;
       }
@@ -99,16 +199,17 @@ export default function LoginPage() {
 
         <form onSubmit={handleLogin} className="space-y-6">
           <div className="space-y-2">
-            <label className="text-sm font-medium text-text-secondary">Email</label>
+            <label className="text-sm font-medium text-text-secondary">Username or Email</label>
             <div className="relative">
-              <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary/50" size={20} />
+              <User className="absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary/50" size={20} />
               <input
-                type="email"
+                type="text"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
                 className="w-full pl-10 pr-4 py-3 bg-primary/5 border border-primary/10 rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all text-text-primary"
-                placeholder="you@example.com"
+                placeholder="Username or you@example.com"
+                autoComplete="username"
               />
             </div>
           </div>
@@ -124,6 +225,7 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full pl-10 pr-12 py-3 bg-primary/5 border border-primary/10 rounded-xl focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all text-text-primary"
                 placeholder="••••••••"
+                autoComplete="current-password"
               />
               <button
                 type="button"

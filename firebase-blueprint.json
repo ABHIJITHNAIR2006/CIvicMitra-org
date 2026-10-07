@@ -134,9 +134,23 @@
         "submittedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "date", "score", "submittedAt"]
+    },
+    "Username": {
+      "title": "Username",
+      "description": "Public username to email/uid mapping for login lookup",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" }
+      },
+      "required": ["uid", "email"]
     }
   },
   "firestore": {
+    "/usernames/{usernameLowercase}": {
+      "schema": "Username",
+      "description": "Public username lookup mapping"
+    },
     "/users/{userId}": {
       "schema": "User",
       "description": "User profiles"

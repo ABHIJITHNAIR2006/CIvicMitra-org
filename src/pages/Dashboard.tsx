@@ -59,7 +59,8 @@ export default function Dashboard() {
   useEffect(() => {
     if (loading) return;
 
-    const storedLevel = localStorage.getItem("user_level");
+    const userLevelKey = auth.currentUser ? `user_level_${auth.currentUser.uid}` : "user_level";
+    const storedLevel = localStorage.getItem(userLevelKey);
     const sessionShown = sessionStorage.getItem("level_shown_this_session");
 
     // 1. Initial Login/Session Popup (Show current level once per session)
@@ -69,7 +70,7 @@ export default function Dashboard() {
       sessionStorage.setItem("level_shown_this_session", "true");
       // Sync localStorage if it's the first time ever
       if (!storedLevel) {
-        localStorage.setItem("user_level", currentLevel.level.toString());
+        localStorage.setItem(userLevelKey, currentLevel.level.toString());
       }
       return;
     }
@@ -80,14 +81,14 @@ export default function Dashboard() {
       if (currentLevel.level > lastLevel) {
         setNewLevel(currentLevel.level);
         setShowLevelUp(true);
-        localStorage.setItem("user_level", currentLevel.level.toString());
+        localStorage.setItem(userLevelKey, currentLevel.level.toString());
         toast.success(`⬆️ Level Up! You are now a ${currentLevel.title}!`, {
           icon: '🎉',
           duration: 5000
         });
       } else if (currentLevel.level < lastLevel) {
         // Sync if points decreased (rare but possible if data resets)
-        localStorage.setItem("user_level", currentLevel.level.toString());
+        localStorage.setItem(userLevelKey, currentLevel.level.toString());
       }
     }
   }, [currentLevel.level, loading]);
@@ -383,7 +384,7 @@ export default function Dashboard() {
         if (snapshot.exists()) {
           const userData = snapshot.data() as UserProfile;
           setProfile(userData);
-          syncBadgesWithFirestorePoints(userData.points || 0);
+          syncBadgesWithFirestorePoints(userData.points || 0, user.uid);
           if (checkIsAdmin(userData.role, user.email)) {
             setIsAdmin(true);
           }

@@ -10,7 +10,7 @@ import { cn } from "../lib/utils";
 import { useEventData } from "../lib/event-registration-utils";
 import { getCurrentLevel } from "../lib/level-utils";
 import LevelBadge from "../components/LevelBadge";
-import { getUserBadges, BADGES, getStats } from "../lib/badge-utils";
+import { BADGES } from "../lib/badge-utils";
 import BadgeCard from "../components/BadgeCard";
 import BadgeUnlockOverlay from "../components/BadgeUnlockOverlay";
 import { useBadges } from "../hooks/useBadges";
@@ -23,9 +23,7 @@ export default function Profile() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("ACTIVITY");
   const { submissions } = useEventData();
-  const { newlyEarnedBadge, closeUnlockOverlay } = useBadges();
-  const userBadges = getUserBadges();
-  const stats = getStats();
+  const { newlyEarnedBadge, closeUnlockOverlay, userBadges, stats } = useBadges();
 
   const totalSubmissionPoints = submissions
     .filter(s => s.userEmail === auth.currentUser?.email)
