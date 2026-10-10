@@ -205,7 +205,7 @@ service cloud.firestore {
                         (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['commentsCount']) || 
                           (request.resource.data.commentsCount == resource.data.commentsCount + 1 || 
                            request.resource.data.commentsCount == resource.data.commentsCount - 1)));
-      allow delete: if isAdmin();
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
 
       match /likes/{userId} {
         allow read: if true;
@@ -256,6 +256,17 @@ service cloud.firestore {
       allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
       allow update: if false;
       allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /image_hashes/{hash} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() &&
+                       request.resource.data.userId == request.auth.uid &&
+                       hash.matches('^[a-f0-9]{64}$') &&
+                       request.resource.data.dhash is string &&
+                       request.resource.data.dhash.size() == 16;
+      allow update: if false;
+      allow delete: if isAdmin();
     }
   }
 }

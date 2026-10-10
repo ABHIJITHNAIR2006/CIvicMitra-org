@@ -96,6 +96,10 @@ export interface Completion {
   verifiedAt?: string;
   likesCount?: number;
   commentsCount?: number;
+  isAiGenerated?: boolean;
+  aiGeneratedLikelihood?: number;
+  aiGeneratedSignals?: string[];
+  aiCheckReason?: string;
 }
 
 export interface ScreenScan {

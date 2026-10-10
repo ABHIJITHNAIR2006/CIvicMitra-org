@@ -5,12 +5,15 @@ import { handleFirestoreError, OperationType } from "../lib/firestore-guard";
 import DashboardLayout from "../layouts/DashboardLayout";
 import { Completion } from "../types";
 import { motion, AnimatePresence } from "motion/react";
-import { Heart, MessageCircle, Share2, MoreHorizontal, Send, Image as ImageIcon, X } from "lucide-react";
+import { Heart, MessageCircle, Share2, MoreHorizontal, Send, Image as ImageIcon, X, Trash2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { toast } from "react-hot-toast";
 import { getCurrentLevel } from "../lib/level-utils";
 import { checkIsAdmin } from "../lib/auth-utils";
 import { DEFAULT_FEED_POSTS } from "../lib/default-data";
+import { useAuth } from "../contexts/AuthContext";
+import { checkImageAuthenticity } from "../services/geminiService";
+import { checkDuplicateImage, registerImageFingerprint } from "../lib/duplicate-check";
 
 // Cache for user profiles to avoid redundant fetches
 const userCache: Record<string, any> = {};
@@ -30,12 +33,42 @@ export default function Feed() {
   const [newPost, setNewPost] = useState("");
   const [isPosting, setIsPosting] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const { user, isAdmin: authIsAdmin } = useAuth();
   const [isAdmin, setIsAdmin] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (checkIsAdmin(null, auth.currentUser?.email)) {
+    if (authIsAdmin || checkIsAdmin(null, auth.currentUser?.email || user?.email)) {
       setIsAdmin(true);
+    }
+  }, [authIsAdmin, user]);
+
+  const handleDeletePost = useCallback(async (postId: string) => {
+    try {
+      if (!postId.startsWith("local-") && !postId.startsWith("default-")) {
+        await deleteDoc(doc(db, "completions", postId)).catch((e) => {
+          handleFirestoreError(e, OperationType.DELETE, `completions/${postId}`);
+        });
+      }
+      
+      setPosts((prev) => {
+        const updated = prev.filter((p) => p.id !== postId);
+        try {
+          localStorage.setItem("eco_cached_feed", JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      toast.success("Post deleted successfully");
+    } catch (error) {
+      console.error("Error deleting post:", error);
+      setPosts((prev) => {
+        const updated = prev.filter((p) => p.id !== postId);
+        try {
+          localStorage.setItem("eco_cached_feed", JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+      toast.success("Post removed from feed");
     }
   }, []);
 
@@ -148,21 +181,62 @@ export default function Feed() {
 
     setIsPosting(true);
     try {
+      let isAiGen = false;
+      let aiLikelihood = 0;
+      let aiSignals: string[] = [];
+      let aiReason = "";
+      let imageFingerprint: any = null;
+
+      if (selectedImage) {
+        // Run duplicate check FIRST so duplicates never reach Gemini
+        const { isDuplicate, fingerprint } = await checkDuplicateImage(selectedImage, { nearMatch: true });
+        if (isDuplicate) {
+          toast.error("This photo was already shared. Please post a new photo.");
+          return;
+        }
+        imageFingerprint = fingerprint;
+
+        toast.loading("Analyzing image authenticity...", { id: "feed-auth-check" });
+        const checkResult = await checkImageAuthenticity(selectedImage);
+        toast.dismiss("feed-auth-check");
+        isAiGen = Boolean(checkResult.isAiGenerated);
+        aiLikelihood = checkResult.aiGeneratedLikelihood || 0;
+        aiSignals = checkResult.aiGeneratedSignals || [];
+        aiReason = checkResult.reason || "";
+      }
+
+      const pointsAwarded = isAiGen ? -5 : 5;
+
       const postData = {
         userId: auth.currentUser.uid,
         challengeId: "community-update",
         proofUrl: selectedImage || `https://picsum.photos/seed/${Math.random()}/800/800`, 
         proofType: "IMAGE",
-        aiVerificationStatus: "VERIFIED",
-        aiVerificationScore: 1.0,
-        pointsAwarded: 5,
+        aiVerificationStatus: isAiGen ? "REJECTED" : "VERIFIED",
+        aiVerificationScore: isAiGen ? 0.0 : 1.0,
+        pointsAwarded,
         isStreakDay: false,
         submittedAt: new Date().toISOString(),
         verifiedAt: new Date().toISOString(),
         caption: newPost,
         likesCount: 0,
-        commentsCount: 0
+        commentsCount: 0,
+        isAiGenerated: isAiGen,
+        aiGeneratedLikelihood: aiLikelihood,
+        aiGeneratedSignals: aiSignals,
+        aiCheckReason: aiReason
       };
+
+      // If AI-generated image detected, deduct 5 points from user's profile
+      if (isAiGen) {
+        const userRef = doc(db, "users", auth.currentUser.uid);
+        await updateDoc(userRef, {
+          points: increment(-5),
+          totalPoints: increment(-5)
+        }).catch(err => {
+          console.warn("Could not deduct profile points:", err);
+        });
+      }
 
       // Optimistically display post immediately in real-time feed
       const optimisticPost = {
@@ -170,7 +244,7 @@ export default function Feed() {
         ...postData,
         username: auth.currentUser.displayName || auth.currentUser.email?.split("@")[0] || "You",
         userAvatar: auth.currentUser.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${auth.currentUser.uid}`,
-        userPoints: 5
+        userPoints: pointsAwarded
       };
       setPosts(prev => {
         const updated = [optimisticPost, ...prev];
@@ -183,10 +257,21 @@ export default function Feed() {
       await addDoc(collection(db, "completions"), postData).catch(e => {
         console.warn("Local post queued for sync:", e);
       });
+
+      // Register image fingerprint for future duplicate detection (non-blocking)
+      if (imageFingerprint) {
+        registerImageFingerprint(imageFingerprint, "FEED");
+      }
+
       setNewPost("");
       setSelectedImage(null);
-      toast.success("Update shared with the community!");
+      if (isAiGen) {
+        toast.error("AI-generated image detected! Penalty: -5 points deducted.");
+      } else {
+        toast.success("Update shared with the community!");
+      }
     } catch (error) {
+      toast.dismiss("feed-auth-check");
       toast.error("Failed to post update");
     } finally {
       setIsPosting(false);
@@ -293,7 +378,7 @@ export default function Feed() {
         ) : (
           <div className="space-y-8">
             {posts.map((post) => (
-              <PostCard key={post.id} post={post} isAdmin={isAdmin} />
+              <PostCard key={post.id} post={post} isAdmin={isAdmin} onDeletePost={handleDeletePost} />
             ))}
           </div>
         )}
@@ -302,12 +387,26 @@ export default function Feed() {
   );
 }
 
-const PostCard = memo(({ post, isAdmin }: { post: any, isAdmin: boolean }) => {
+const PostCard = memo(({ 
+  post, 
+  isAdmin, 
+  onDeletePost 
+}: { 
+  post: any; 
+  isAdmin: boolean; 
+  onDeletePost: (postId: string) => Promise<void>; 
+}) => {
   const [liked, setLiked] = useState(false);
   const [commentText, setCommentText] = useState("");
   const [isCommenting, setIsCommenting] = useState(false);
   const [showComments, setShowComments] = useState(false);
   const [comments, setComments] = useState<any[]>([]);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const isAuthor = Boolean(auth.currentUser?.uid && auth.currentUser.uid === post.userId);
+  const canDelete = isAuthor || isAdmin;
 
   // Check if user liked the post
   useEffect(() => {
@@ -461,9 +560,61 @@ const PostCard = memo(({ post, isAdmin }: { post: any, isAdmin: boolean }) => {
             <p className="text-xs text-text-secondary">{new Date(post.submittedAt).toLocaleString()}</p>
           </div>
         </div>
-        <button className="p-2 text-text-secondary hover:bg-primary/5 rounded-full">
-          <MoreHorizontal size={20} />
-        </button>
+        {/* Post Options Menu */}
+        <div className="relative">
+          <button 
+            type="button"
+            onClick={() => setIsMenuOpen(prev => !prev)}
+            className="p-2 text-text-secondary hover:text-text-primary hover:bg-primary/5 rounded-full transition-colors"
+            title="More options"
+          >
+            <MoreHorizontal size={20} />
+          </button>
+
+          {isMenuOpen && (
+            <>
+              <div 
+                className="fixed inset-0 z-20" 
+                onClick={() => setIsMenuOpen(false)} 
+              />
+              <div className="absolute right-0 top-full mt-1 w-52 bg-card rounded-2xl shadow-xl border border-primary/10 py-1.5 z-30 overflow-hidden text-sm animate-in fade-in zoom-in-95 duration-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMenuOpen(false);
+                    if (navigator.clipboard) {
+                      navigator.clipboard.writeText(window.location.href);
+                      toast.success("Post link copied to clipboard!");
+                    }
+                  }}
+                  className="w-full px-3.5 py-2.5 text-left text-text-secondary hover:text-text-primary hover:bg-primary/5 flex items-center gap-2.5 transition-colors"
+                >
+                  <Share2 size={16} />
+                  <span>Copy Link</span>
+                </button>
+
+                {canDelete && (
+                  <>
+                    <div className="h-px bg-primary/5 my-1" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsMenuOpen(false);
+                        setShowDeleteModal(true);
+                      }}
+                      className="w-full px-3.5 py-2.5 text-left text-red-600 dark:text-red-400 hover:bg-red-500/10 flex items-center gap-2.5 font-medium transition-colors"
+                    >
+                      <Trash2 size={16} />
+                      <span>
+                        {isAdmin && !isAuthor ? "Delete Post (Admin)" : "Delete Post"}
+                      </span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Post Content */}
@@ -511,8 +662,13 @@ const PostCard = memo(({ post, isAdmin }: { post: any, isAdmin: boolean }) => {
               <Share2 size={24} />
             </button>
           </div>
-          <div className="bg-primary/10 text-primary px-3 py-1 rounded-full text-xs font-bold">
-            +{post.pointsAwarded} pts
+          <div className={cn(
+            "px-3 py-1 rounded-full text-xs font-bold",
+            (post.pointsAwarded ?? 0) < 0
+              ? "bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20"
+              : "bg-primary/10 text-primary"
+          )}>
+            {(post.pointsAwarded ?? 0) > 0 ? `+${post.pointsAwarded}` : (post.pointsAwarded ?? 0)} pts
           </div>
         </div>
 
@@ -577,6 +733,71 @@ const PostCard = memo(({ post, isAdmin }: { post: any, isAdmin: boolean }) => {
           )}
         </AnimatePresence>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {showDeleteModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="bg-card w-full max-w-sm rounded-3xl p-6 shadow-2xl border border-primary/10 space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="w-12 h-12 rounded-2xl bg-red-500/10 text-red-500 flex items-center justify-center">
+                <Trash2 size={24} />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-text-primary">
+                  {isAdmin && !isAuthor ? "Delete User Post?" : "Delete Your Post?"}
+                </h3>
+                <p className="text-sm text-text-secondary mt-1 leading-relaxed">
+                  {isAdmin && !isAuthor
+                    ? `Are you sure you want to remove this post by @${post.username}? As an admin, this post will be permanently removed for everyone.`
+                    : "Are you sure you want to delete this post? It will be permanently removed from the community feed."}
+                </p>
+              </div>
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={() => setShowDeleteModal(false)}
+                  className="px-4 py-2 rounded-xl text-text-secondary hover:bg-primary/5 font-semibold text-sm transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={async () => {
+                    setIsDeleting(true);
+                    try {
+                      await onDeletePost(post.id);
+                      setShowDeleteModal(false);
+                    } finally {
+                      setIsDeleting(false);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold text-sm flex items-center gap-2 transition-colors disabled:opacity-50 shadow-md shadow-red-500/20"
+                >
+                  {isDeleting ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <span>Deleting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 size={16} />
+                      <span>Delete</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 });

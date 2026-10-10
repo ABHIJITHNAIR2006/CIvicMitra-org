@@ -12,11 +12,22 @@ export interface ScreenScanResult {
   confidence: number; // 0.0–1.0
   verified: boolean;
   reason: string;
+  aiGeneratedLikelihood?: number;
+  aiGeneratedSignals?: string[];
 }
 
 export interface VerifyProofResult {
   verified: boolean;
   score: number;
+  reason: string;
+  aiGeneratedLikelihood?: number;
+  aiGeneratedSignals?: string[];
+}
+
+export interface CheckImageResult {
+  isAiGenerated: boolean;
+  aiGeneratedLikelihood: number;
+  aiGeneratedSignals: string[];
   reason: string;
 }
 
@@ -210,6 +221,85 @@ export async function verifyEcoProof(
       reason: isTimeout
         ? "AI verification request timed out (20s). Please check your internet connection and try again."
         : (err?.message ? `Network request failed: ${err.message}` : "Failed to connect to verification service.")
+    };
+  }
+}
+
+export async function checkImageAuthenticity(imageUrl: string): Promise<CheckImageResult> {
+  if (!imageUrl) {
+    return {
+      isAiGenerated: false,
+      aiGeneratedLikelihood: 0,
+      aiGeneratedSignals: [],
+      reason: "No image provided"
+    };
+  }
+
+  const startTime = Date.now();
+  console.log(`[${new Date().toISOString()}] [checkImageAuthenticity] Sending image check request`);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error("Image check request timed out after 20s"));
+  }, 20000);
+
+  try {
+    const res = await fetch("/api/check-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageUrl }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    const duration = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] [checkImageAuthenticity] Server responded in ${duration}ms with HTTP status ${res.status}`);
+
+    const contentType = res.headers.get("content-type") || "";
+    if (!res.ok) {
+      let errorDetail = "";
+      if (contentType.includes("application/json")) {
+        try {
+          const errorJson = await res.json();
+          errorDetail = errorJson.reason || errorJson.error || JSON.stringify(errorJson);
+        } catch {}
+      } else {
+        const errorText = await res.text();
+        errorDetail = errorText.slice(0, 300);
+      }
+      console.error(`[${new Date().toISOString()}] [checkImageAuthenticity] Server error ${res.status}:`, errorDetail);
+      return {
+        isAiGenerated: false,
+        aiGeneratedLikelihood: 0,
+        aiGeneratedSignals: [],
+        reason: errorDetail || `Image check service failed with status ${res.status}`
+      };
+    }
+
+    if (!contentType.includes("application/json")) {
+      return {
+        isAiGenerated: false,
+        aiGeneratedLikelihood: 0,
+        aiGeneratedSignals: [],
+        reason: "Server returned non-JSON response."
+      };
+    }
+
+    const data = await res.json();
+    return {
+      isAiGenerated: Boolean(data.isAiGenerated),
+      aiGeneratedLikelihood: typeof data.aiGeneratedLikelihood === "number" ? data.aiGeneratedLikelihood : 0,
+      aiGeneratedSignals: Array.isArray(data.aiGeneratedSignals) ? data.aiGeneratedSignals : [],
+      reason: data.reason || (data.isAiGenerated ? "AI-generated image detected." : "Image appears authentic.")
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    console.error("[checkImageAuthenticity] Request failed:", err);
+    return {
+      isAiGenerated: false,
+      aiGeneratedLikelihood: 0,
+      aiGeneratedSignals: [],
+      reason: err?.message || "Failed to connect to image authenticity check service."
     };
   }
 }

@@ -17,6 +17,7 @@ import { scanScreenForCivicChallenge, ScanCandidateChallenge } from "../services
 import { updateStats, getStats } from "../lib/badge-utils";
 import { compressImagePayload } from "../lib/image-utils";
 import { toast } from "react-hot-toast";
+import { checkDuplicateImage, registerImageFingerprint } from "../lib/duplicate-check";
 
 type ScannerMode = "CHOOSE" | "CAMERA" | "ANALYZING" | "RESULT";
 
@@ -225,6 +226,22 @@ export default function AIScreenScanner() {
     const uid = auth.currentUser?.uid;
 
     try {
+      // Global exact duplicate check before calling Gemini
+      const { isDuplicate, fingerprint } = await checkDuplicateImage(dataUrl, { nearMatch: false });
+      if (isDuplicate) {
+        toast.error("This exact screenshot was already submitted.");
+        setAnalysisResult({
+          verified: false,
+          isCivicRelated: false,
+          confidence: 0,
+          pointsAwarded: 0,
+          reason: "This exact screenshot was already submitted.",
+          isDuplicate: true
+        });
+        setMode("RESULT");
+        return;
+      }
+
       // Step A: Duplicate check via SHA-256 hash
       const imageHash = await calculateImageHash(dataUrl);
 
@@ -337,6 +354,9 @@ export default function AIScreenScanner() {
           await addDoc(collection(db, "completions"), compData).catch((e) =>
             handleFirestoreError(e, OperationType.CREATE, "completions")
           );
+
+          // Register fingerprint for duplicate detection (non-blocking)
+          registerImageFingerprint(fingerprint, "SCREEN_SCAN", matchedChallenge.challengeId);
 
           // Update user points and completedChallenges in Firestore
           await updateDoc(doc(db, "users", uid), {

@@ -11,6 +11,7 @@ import { verifyEcoProof } from "../services/geminiService";
 import { updateStats } from "../lib/badge-utils";
 import { compressImagePayload } from "../lib/image-utils";
 import { toast } from "react-hot-toast";
+import { checkDuplicateImage, registerImageFingerprint } from "../lib/duplicate-check";
 
 interface ChallengeModalProps {
   challenge: Challenge;
@@ -87,6 +88,17 @@ export default function ChallengeModal({ challenge, onClose }: ChallengeModalPro
     }, 28000);
 
     try {
+      // 0. Check for duplicate image BEFORE calling Gemini
+      const { isDuplicate, fingerprint } = await checkDuplicateImage(preview, { nearMatch: true });
+      if (isDuplicate) {
+        setStatus("ERROR");
+        setReason("This photo has already been used for a submission. Please upload a new photo taken for this challenge.");
+        toast.error("Duplicate photo.");
+        if (safetyTimeoutRef.current) clearTimeout(safetyTimeoutRef.current);
+        setSubmitting(false);
+        return;
+      }
+
       // 1. Run AI Verification FIRST
       console.log(`[${new Date().toISOString()}] [ChallengeModal] Starting AI verification for "${challenge.title}"`);
       const result = await verifyEcoProof(preview, challenge.title, challenge.proofInstructions);
@@ -136,6 +148,9 @@ export default function ChallengeModal({ challenge, onClose }: ChallengeModalPro
       await addDoc(collection(db, "completions"), completionData).catch(e => 
         handleFirestoreError(e, OperationType.CREATE, "completions")
       );
+
+      // Register image fingerprint for future duplicate checks (non-blocking)
+      registerImageFingerprint(fingerprint, "CHALLENGE", challenge.challengeId);
 
       // 4. Update User Points & Streak
       const userRef = doc(db, "users", auth.currentUser.uid);
