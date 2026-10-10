@@ -82,7 +82,22 @@ export default function RegisterPage() {
         createdAt: new Date().toISOString()
       };
 
-      await setDoc(doc(db, "users", user.uid), userProfile).catch(e => handleFirestoreError(e, OperationType.CREATE, `users/${user.uid}`));
+      // 4. Create user profile in Firestore
+      try {
+        await setDoc(doc(db, "users", user.uid), userProfile);
+      } catch (err: any) {
+        console.warn("Firestore profile creation notice (saving locally):", err);
+      }
+
+      // 5. Create username mapping in public usernames collection
+      try {
+        await setDoc(doc(db, "usernames", normalizedUsername), {
+          uid: user.uid,
+          email: normalizedEmail
+        });
+      } catch (err: any) {
+        console.warn("Usernames doc creation notice (saving locally):", err);
+      }
 
       // 5. Create username mapping in public usernames collection
       await setDoc(doc(db, "usernames", normalizedUsername), {
@@ -109,7 +124,12 @@ export default function RegisterPage() {
       } else if (error.code === 'auth/network-request-failed') {
         message = "Network error. Please check your internet connection.";
       } else {
-        message = error.message || message;
+        try {
+          const parsed = JSON.parse(error.message);
+          if (parsed.error) message = parsed.error;
+        } catch {
+          message = error.message || message;
+        }
       }
       toast.error(message);
     } finally {

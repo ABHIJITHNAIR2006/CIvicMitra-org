@@ -74,12 +74,17 @@ export const useEventData = () => {
         (snap) => {
           const regs = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Registration));
           setRegistrations(regs);
+          try {
+            localStorage.setItem("eco_cached_participants", JSON.stringify(regs));
+          } catch {}
           setLoading(false);
         },
         (error) => {
-          if (auth.currentUser) {
-            handleFirestoreError(error, OperationType.LIST, "event_participants_public");
-          }
+          console.warn("Event participants snapshot notice (quota/offline):", error?.message || error);
+          try {
+            const cached = localStorage.getItem("eco_cached_participants");
+            if (cached) setRegistrations(JSON.parse(cached));
+          } catch {}
           setLoading(false);
         }
       );
@@ -90,12 +95,17 @@ export const useEventData = () => {
         (snap) => {
           const subs = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Submission));
           setSubmissions(subs);
+          try {
+            localStorage.setItem("eco_cached_completions", JSON.stringify(subs));
+          } catch {}
           setLoading(false);
         },
         (error) => {
-          if (auth.currentUser) {
-            handleFirestoreError(error, OperationType.LIST, "completions");
-          }
+          console.warn("Completions snapshot notice (quota/offline):", error?.message || error);
+          try {
+            const cached = localStorage.getItem("eco_cached_completions");
+            if (cached) setSubmissions(JSON.parse(cached));
+          } catch {}
           setLoading(false);
         }
       );
@@ -116,12 +126,17 @@ export const useEventData = () => {
             timestamp: doc.data().submittedAt
           } as QuizScore));
           setQuizScores(scores);
+          try {
+            localStorage.setItem(`eco_cached_quiz_${user.uid}`, JSON.stringify(scores));
+          } catch {}
           setLoading(false);
         },
         (error) => {
-          if (auth.currentUser) {
-            handleFirestoreError(error, OperationType.LIST, "quiz_attempts");
-          }
+          console.warn("Quiz scores snapshot notice (quota/offline):", error?.message || error);
+          try {
+            const cached = localStorage.getItem(`eco_cached_quiz_${user.uid}`);
+            if (cached) setQuizScores(JSON.parse(cached));
+          } catch {}
           setLoading(false);
         }
       );

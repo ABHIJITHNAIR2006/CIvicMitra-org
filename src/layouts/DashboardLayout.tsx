@@ -18,18 +18,17 @@ import {
   Star
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { onAuthStateChanged } from "firebase/auth";
 import { motion, AnimatePresence } from "motion/react";
 import { cn } from "../lib/utils";
-import { doc, getDoc } from "firebase/firestore";
-import { db } from "../firebase";
 import { Role } from "../types";
 import { useEventData } from "../lib/event-registration-utils";
 import { getCurrentLevel } from "../lib/level-utils";
 import { clearLegacyBadgeStorage, clearUserBadgeData, syncBadgesWithFirestorePoints } from "../lib/badge-utils";
 import { useBadges } from "../hooks/useBadges";
 import { checkIsAdmin } from "../lib/auth-utils";
+import { useAuth } from "../contexts/AuthContext";
 import AIScreenScanner from "../components/AIScreenScanner";
+import QuotaWarningBanner from "../components/QuotaWarningBanner";
 
 const baseNavItems = [
   { icon: Home, label: "Dashboard", path: "/dashboard" },
@@ -42,6 +41,7 @@ const baseNavItems = [
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  const { user, profile, isAdmin: authIsAdmin } = useAuth();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -53,42 +53,47 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const { userBadges } = useBadges();
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      if (!user) {
-        setIsAdmin(false);
-        setUserEmail(null);
-        setFirestorePoints(0);
-        setUserName(null);
-        return;
+    if (!user) {
+      setIsAdmin(false);
+      setUserEmail(null);
+      setFirestorePoints(0);
+      setUserName(null);
+      return;
+    }
+
+    setUserEmail(user.email);
+
+    if (profile) {
+      const pts = profile.points || 0;
+      setFirestorePoints(pts);
+      syncBadgesWithFirestorePoints(pts, user.uid);
+      setUserName(profile.fullName || profile.username || user.displayName || "Eco Warrior");
+      if (authIsAdmin || checkIsAdmin(profile.role, user.email)) {
+        setIsAdmin(true);
       }
-      
-      setUserEmail(user.email);
-      
+    } else {
+      // Check offline localStorage profile cache
       try {
-        const userDoc = await getDoc(doc(db, "users", user.uid)).catch(e => {
-          console.error("User profile fetch failed:", e);
-          return null;
-        });
-        
-        if (userDoc && userDoc.exists()) {
-          const userData = userDoc.data();
-          const pts = userData.points || 0;
+        const cachedRaw = localStorage.getItem(`eco_user_profile_${user.uid}`);
+        if (cachedRaw) {
+          const cached = JSON.parse(cachedRaw);
+          const pts = cached.points || 0;
           setFirestorePoints(pts);
           syncBadgesWithFirestorePoints(pts, user.uid);
-          setUserName(userData.fullName || userData.username || user.displayName);
-          if (checkIsAdmin(userData.role, user.email)) {
+          setUserName(cached.fullName || cached.username || user.displayName || "Eco Warrior");
+          if (authIsAdmin || checkIsAdmin(cached.role, user.email)) {
             setIsAdmin(true);
           }
-        } else if (checkIsAdmin(null, user.email)) {
-          setIsAdmin(true);
+          return;
         }
-      } catch (error) {
-        console.error("Error checking user status:", error);
-      }
-    });
+      } catch {}
 
-    return () => unsubscribe();
-  }, []);
+      if (authIsAdmin || checkIsAdmin(null, user.email)) {
+        setIsAdmin(true);
+      }
+      setUserName(user.displayName || user.email?.split("@")[0] || "Eco Warrior");
+    }
+  }, [user, profile, authIsAdmin]);
 
   const eventPoints = submissions
     .filter(s => s.userEmail === userEmail)
@@ -289,9 +294,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       </AnimatePresence>
 
       {/* Main Content */}
-      <main className="flex-1 lg:p-8 p-4 pt-20 lg:pt-8 max-w-7xl mx-auto w-full">
-        {children}
-      </main>
+      <div className="flex-1 flex flex-col min-w-0">
+        <QuotaWarningBanner />
+        <main className="flex-1 lg:p-8 p-4 pt-20 lg:pt-8 max-w-7xl mx-auto w-full">
+          {children}
+        </main>
+      </div>
 
       {/* Floating Ambient AI Screen Scanner & Quick Nav Widget */}
       <AIScreenScanner />

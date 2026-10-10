@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, memo } from "react";
-import { collection, query, orderBy, limit, onSnapshot } from "firebase/firestore";
+import { collection, query, limit, onSnapshot } from "firebase/firestore";
 import { db, auth } from "../firebase";
 import DashboardLayout from "../layouts/DashboardLayout";
 import { UserProfile } from "../types";
@@ -8,25 +8,148 @@ import { Trophy, Medal, Star, Flame } from "lucide-react";
 import { cn } from "../lib/utils";
 import { useEventData } from "../lib/event-registration-utils";
 import { getCurrentLevel } from "../lib/level-utils";
-import { getUserBadges, BADGES } from "../lib/badge-utils";
+import { getUserBadges } from "../lib/badge-utils";
+
+// Filter out any legacy dummy/fake users (e.g. user-top-*, demo-user-*, mock-*, aarav_green, diya_eco, karan_nature, priya_earth)
+export const isFakeUser = (uid?: string, username?: string, email?: string): boolean => {
+  if (!uid) return true;
+  const uidLower = uid.toLowerCase();
+  if (
+    uidLower.startsWith("user-top-") ||
+    uidLower.startsWith("demo-user-") ||
+    uidLower.startsWith("mock-") ||
+    uidLower.startsWith("fake-") ||
+    uidLower.startsWith("temp-") ||
+    uidLower.startsWith("sample-")
+  ) {
+    return true;
+  }
+
+  const fakeUsernames = [
+    "aarav_green", "diya_eco", "karan_nature", "priya_earth",
+    "eco_champion", "green_warrior", "demo_user", "test_user"
+  ];
+  if (username && fakeUsernames.includes(username.toLowerCase().trim())) {
+    return true;
+  }
+
+  const fakeEmails = [
+    "aarav@example.com", "diya@example.com", "karan@example.com", "priya@example.com"
+  ];
+  if (email) {
+    const eLower = email.toLowerCase().trim();
+    if (fakeEmails.includes(eLower)) return true;
+    if (eLower.endsWith("@example.com") && (eLower.includes("aarav") || eLower.includes("diya") || eLower.includes("karan") || eLower.includes("priya"))) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+// Merge only real users whose data is present in Firebase (or active user)
+const mergeLeaderboardUsers = (firestoreUsers: UserProfile[], eventPoints: number): UserProfile[] => {
+  const currentAuth = auth.currentUser;
+  const userMap = new Map<string, UserProfile>();
+
+  // 1. Real Firestore users from database ONLY (no fake social mock objects)
+  firestoreUsers.forEach(u => {
+    if (u && u.uid && !isFakeUser(u.uid, u.username, u.email)) {
+      const pts = Number(u.points ?? u.totalPoints ?? u.experiencePoints ?? 0);
+      const anyU = u as any;
+      userMap.set(u.uid, {
+        uid: u.uid,
+        username: u.username || (u.email ? u.email.split('@')[0] : "eco_warrior"),
+        fullName: u.fullName || anyU.name || anyU.displayName || u.username || "Eco Warrior",
+        avatarUrl: u.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${u.uid}`,
+        points: pts,
+        totalPoints: pts,
+        currentStreak: u.currentStreak || 0,
+        longestStreak: u.longestStreak || 0,
+        level: u.level || getCurrentLevel(pts).level,
+        experiencePoints: pts,
+        city: u.city || anyU.college || "Earth",
+        country: u.country || "India",
+        email: u.email || "",
+        role: u.role || ("USER" as any),
+        createdAt: u.createdAt || new Date().toISOString()
+      });
+    }
+  });
+
+  // 2. Current authenticated user (ensure their real points are up to date and include event points)
+  if (currentAuth && !isFakeUser(currentAuth.uid, undefined, currentAuth.email || undefined)) {
+    const existing = userMap.get(currentAuth.uid);
+    let basePts = existing?.points;
+
+    // Check local profile storage if not yet in snapshot list
+    if (basePts === undefined) {
+      try {
+        const cachedSelf = localStorage.getItem(`eco_user_profile_${currentAuth.uid}`);
+        if (cachedSelf) {
+          const parsed = JSON.parse(cachedSelf);
+          basePts = Number(parsed.points ?? parsed.totalPoints ?? 0);
+        }
+      } catch {}
+    }
+
+    const currentPoints = Number(basePts ?? 0);
+
+    userMap.set(currentAuth.uid, {
+      uid: currentAuth.uid,
+      username: existing?.username || currentAuth.email?.split('@')[0] || "user",
+      fullName: existing?.fullName || currentAuth.displayName || currentAuth.email?.split('@')[0] || "You",
+      avatarUrl: existing?.avatarUrl || currentAuth.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${currentAuth.uid}`,
+      points: currentPoints,
+      totalPoints: currentPoints,
+      currentStreak: existing?.currentStreak || 0,
+      longestStreak: existing?.longestStreak || 0,
+      level: existing?.level || getCurrentLevel(currentPoints + eventPoints).level,
+      experiencePoints: currentPoints,
+      city: existing?.city || "Earth",
+      country: existing?.country || "India",
+      email: currentAuth.email || "",
+      role: existing?.role || ("USER" as any),
+      createdAt: existing?.createdAt || new Date().toISOString()
+    });
+  }
+
+  // Sort real users by total points descending
+  const list = Array.from(userMap.values());
+  return list.sort((a, b) => {
+    const ptsA = a.uid === currentAuth?.uid ? (a.points || 0) + eventPoints : (a.points || 0);
+    const ptsB = b.uid === currentAuth?.uid ? (b.points || 0) + eventPoints : (b.points || 0);
+    return ptsB - ptsA;
+  });
+};
 
 export default function Leaderboard() {
-  const [users, setUsers] = useState<UserProfile[]>([]);
+  const { submissions } = useEventData();
+  const eventPoints = useMemo(() => {
+    return submissions
+      .filter(s => s.userEmail === auth.currentUser?.email)
+      .reduce((total, s) => total + s.points, 0);
+  }, [submissions]);
+
+  const [users, setUsers] = useState<UserProfile[]>(() => {
+    try {
+      const cached = localStorage.getItem("eco_cached_leaderboard");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // Strictly filter out any fake users from existing cache
+          const realCached = parsed.filter(u => u && u.uid && !isFakeUser(u.uid, u.username, u.email));
+          return mergeLeaderboardUsers(realCached, 0);
+        }
+      }
+    } catch {}
+    return mergeLeaderboardUsers([], 0);
+  });
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("ALL_TIME");
-  const { submissions } = useEventData();
+  const [isQuotaLimited, setIsQuotaLimited] = useState(false);
   const userBadges = getUserBadges();
 
-  const eventPoints = submissions
-    .filter(s => s.userEmail === auth.currentUser?.email)
-    .reduce((total, s) => total + s.points, 0);
-
-  // Helper to get prestigious badges for a user
-  // Since we only have localStorage for the current user, 
-  // we can only show badges for the current user correctly.
-  // For others, we'll just show their level as before, or mock if needed.
-  // BUT the prompt says "Show 2 most prestigious badges next to name"
-  // I'll implement a way to get them for the current user.
   const getPrestigiousBadges = (uid: string) => {
     if (uid !== auth.currentUser?.uid) return [];
     
@@ -40,29 +163,47 @@ export default function Leaderboard() {
 
   useEffect(() => {
     setLoading(true);
-    // Real-time listener on users collection
-    const q = query(collection(db, "users"), orderBy("points", "desc"), limit(50));
+    // Fetch users directly without strict orderBy constraints that omit unindexed documents
+    const q = query(collection(db, "users"), limit(100));
     
     const unsubscribe = onSnapshot(q, (snap) => {
-      const leaderboardData = snap.docs.map(d => ({
-        uid: d.id,
-        ...d.data()
-      } as UserProfile));
-      setUsers(leaderboardData);
+      setIsQuotaLimited(false);
+      let rawUsers: UserProfile[] = [];
+      if (!snap.empty) {
+        rawUsers = snap.docs
+          .map(d => ({
+            uid: d.id,
+            ...d.data()
+          } as UserProfile))
+          .filter(u => u && u.uid && !isFakeUser(u.uid, u.username, u.email));
+
+        try {
+          localStorage.setItem("eco_cached_leaderboard", JSON.stringify(rawUsers));
+        } catch {}
+      }
+      const merged = mergeLeaderboardUsers(rawUsers, eventPoints);
+      setUsers(merged);
       setLoading(false);
     }, (error) => {
-      console.error("Error fetching leaderboard:", error);
+      console.warn("Leaderboard snapshot notice (offline/quota), using cached real users:", error);
+      setIsQuotaLimited(true);
+      let cached: UserProfile[] = [];
+      try {
+        const raw = localStorage.getItem("eco_cached_leaderboard");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            cached = parsed.filter(u => u && u.uid && !isFakeUser(u.uid, u.username, u.email));
+          }
+        }
+      } catch {}
+      const merged = mergeLeaderboardUsers(cached, eventPoints);
+      setUsers(merged);
       setLoading(false);
     });
 
     return () => unsubscribe();
-  }, [activeTab]);
-
-  const podiumUsers = useMemo(() => {
-    if (users.length < 3) return [];
-    // Return in order: [2nd, 1st, 3rd] for layout
-    return [users[1], users[0], users[2]];
-  }, [users]);
+  }, [activeTab, eventPoints]);
 
   return (
     <DashboardLayout>
@@ -71,6 +212,27 @@ export default function Leaderboard() {
           <h1 className="text-4xl mb-4">Eco Leaderboard</h1>
           <p className="text-text-secondary">See how you stack up against the global community of eco-warriors.</p>
         </div>
+
+        {isQuotaLimited && (
+          <div className="max-w-2xl mx-auto bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex items-start justify-between gap-3 text-sm text-amber-900 dark:text-amber-200">
+            <div className="flex items-start gap-3">
+              <span className="text-xl">⚡</span>
+              <div>
+                <p className="font-bold">Firestore Free Quota Status (Local Cache Mode Active)</p>
+                <p className="text-xs opacity-90 mt-0.5">
+                  Firestore free tier limit is 50,000 document reads/day (resets daily at midnight PST / 00:00 UTC). Real registered users and their earned points are preserved in local storage.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setIsQuotaLimited(false)}
+              className="text-xs px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-200 font-medium transition-colors flex-shrink-0"
+              title="Dismiss notice"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex justify-center">
@@ -91,11 +253,22 @@ export default function Leaderboard() {
         </div>
 
         {/* Podium */}
-        {!loading && podiumUsers.length >= 3 && (
+        {!loading && users.length >= 3 && (
           <div className="flex items-end justify-center gap-4 md:gap-12 py-12">
-            <PodiumItem user={podiumUsers[0]} rank={2} height="h-48" eventPoints={eventPoints} />
-            <PodiumItem user={podiumUsers[1]} rank={1} height="h-64" eventPoints={eventPoints} />
-            <PodiumItem user={podiumUsers[2]} rank={3} height="h-40" eventPoints={eventPoints} />
+            <PodiumItem user={users[1]} rank={2} height="h-48" eventPoints={eventPoints} />
+            <PodiumItem user={users[0]} rank={1} height="h-64" eventPoints={eventPoints} />
+            <PodiumItem user={users[2]} rank={3} height="h-40" eventPoints={eventPoints} />
+          </div>
+        )}
+        {!loading && users.length === 2 && (
+          <div className="flex items-end justify-center gap-4 md:gap-12 py-12">
+            <PodiumItem user={users[0]} rank={1} height="h-64" eventPoints={eventPoints} />
+            <PodiumItem user={users[1]} rank={2} height="h-48" eventPoints={eventPoints} />
+          </div>
+        )}
+        {!loading && users.length === 1 && (
+          <div className="flex items-end justify-center py-12">
+            <PodiumItem user={users[0]} rank={1} height="h-64" eventPoints={eventPoints} />
           </div>
         )}
 
@@ -111,6 +284,16 @@ export default function Leaderboard() {
           {loading ? (
             <div className="p-12 text-center animate-pulse space-y-4">
               {[1, 2, 3, 4, 5].map(i => <div key={i} className="h-12 bg-primary/5 rounded-xl" />)}
+            </div>
+          ) : users.length === 0 ? (
+            <div className="p-12 text-center space-y-3">
+              <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto text-primary text-2xl font-bold">
+                🌱
+              </div>
+              <h3 className="text-xl font-bold text-text-primary">No Real Users Yet</h3>
+              <p className="text-sm text-text-secondary max-w-md mx-auto">
+                Be the first eco-warrior on the leaderboard! Complete challenges and join events to earn points and claim the top rank.
+              </p>
             </div>
           ) : (
             <div className="divide-y divide-primary/5">

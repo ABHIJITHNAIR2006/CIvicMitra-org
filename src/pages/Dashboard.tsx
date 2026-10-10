@@ -25,10 +25,12 @@ import { calculateCO2, calculateElectricity, calculateWater, calculateWaste, for
 import ImpactCard from "../components/ImpactCard";
 import { checkIsAdmin } from "../lib/auth-utils";
 import { syncBadgesWithFirestorePoints } from "../lib/badge-utils";
+import { DEFAULT_CHALLENGES } from "../lib/default-data";
+import { getSocialState } from "../lib/social-utils";
 
 export default function Dashboard() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [dailyChallenges, setDailyChallenges] = useState<Challenge[]>([]);
+  const [dailyChallenges, setDailyChallenges] = useState<Challenge[]>(() => DEFAULT_CHALLENGES.filter(c => c.isDaily).slice(0, 3));
   const [recentActivity, setRecentActivity] = useState<Completion[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedChallenge, setSelectedChallenge] = useState<Challenge | null>(null);
@@ -136,56 +138,15 @@ export default function Dashboard() {
     );
   }, [profile, displayCO2, totalPoints, isUpdating]);
 
-  const [communityCO2, setCommunityCO2] = useState<number>(0);
-  const [communityElectricity, setCommunityElectricity] = useState(0);
-  const [communityWater, setCommunityWater] = useState(0);
-  const [communityWaste, setCommunityWaste] = useState(0);
+  const [communityCO2, setCommunityCO2] = useState<number>(() => calculateCO2(1250));
+  const [communityElectricity, setCommunityElectricity] = useState(() => calculateElectricity(1250));
+  const [communityWater, setCommunityWater] = useState(() => calculateWater(1250));
+  const [communityWaste, setCommunityWaste] = useState(() => calculateWaste(1250));
+  const [isQuotaLimited, setIsQuotaLimited] = useState(false);
 
-  const fetchData = async () => {
+  const checkDailyQuiz = async () => {
     if (!auth.currentUser) return;
-
     try {
-      // Parallel fetching for other data
-      const [challengesSnap, activitySnap, usersSnap] = await Promise.all([
-        getDocs(query(collection(db, "challenges"), where("isDaily", "==", true), limit(3))).catch(e => {
-          console.error("Challenges fetch failed:", e);
-          return null;
-        }),
-        getDocs(query(
-          collection(db, "completions"), 
-          where("userId", "==", auth.currentUser.uid),
-          limit(20)
-        )).catch(e => {
-          console.error("Activity fetch failed:", e);
-          return null;
-        }),
-        getDocs(collection(db, "users")).catch(e => {
-          console.error("Users fetch failed:", e);
-          return null;
-        })
-      ]);
-
-      if (challengesSnap) {
-        setDailyChallenges(challengesSnap.docs.map(d => ({ challengeId: d.data().challengeId || d.id, ...d.data() } as Challenge)));
-      }
-
-      if (activitySnap) {
-        const sortedComps = activitySnap.docs
-          .map(d => ({ id: d.id, ...d.data() } as Completion))
-          .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())
-          .slice(0, 5);
-        setRecentActivity(sortedComps);
-      }
-
-      if (usersSnap) {
-        const communityPoints = usersSnap.docs.reduce((sum, doc) => sum + (doc.data().points || 0), 0);
-        setCommunityCO2(calculateCO2(communityPoints));
-        setCommunityElectricity(calculateElectricity(communityPoints));
-        setCommunityWater(calculateWater(communityPoints));
-        setCommunityWaste(calculateWaste(communityPoints));
-      }
-
-      // Check for daily quiz attempt
       const today = new Date().toISOString().split('T')[0];
       const quizQuery = query(
         collection(db, "quiz_attempts"),
@@ -193,19 +154,12 @@ export default function Dashboard() {
         where("date", "==", today),
         limit(1)
       );
-      const quizSnap = await getDocs(quizQuery).catch(e => {
-        console.error("Quiz check failed:", e);
-        return null;
-      });
-
+      const quizSnap = await getDocs(quizQuery).catch(() => null);
       if (quizSnap && quizSnap.empty) {
         setIsQuizOpen(true);
       }
-    } catch (error: any) {
-      console.error("Error fetching dashboard data:", error?.message || "Unknown error");
-      toast.error("Some data failed to load. Please refresh.");
-    } finally {
-      setLoading(false);
+    } catch {
+      // Quiz check silent fallback
     }
   };
 
@@ -354,7 +308,6 @@ export default function Dashboard() {
       });
       await batch.commit();
       toast.success("Challenges seeded successfully!");
-      fetchData();
     } catch (error) {
       toast.error("Failed to seed data");
     } finally {
@@ -364,13 +317,20 @@ export default function Dashboard() {
 
   useEffect(() => {
     let unsubscribeProfile = () => {};
+    let unsubscribeUsers = () => {};
+    let unsubscribeChallenges = () => {};
+    let unsubscribeActivity = () => {};
 
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       unsubscribeProfile();
+      unsubscribeUsers();
+      unsubscribeChallenges();
+      unsubscribeActivity();
 
       if (!user) {
         setProfile(null);
         setIsAdmin(false);
+        setLoading(false);
         return;
       }
 
@@ -379,28 +339,103 @@ export default function Dashboard() {
         setIsAdmin(true);
       }
 
-      // Real-time user profile listener
+      // 1. Real-time user profile listener
       unsubscribeProfile = onSnapshot(doc(db, "users", user.uid), (snapshot) => {
         if (snapshot.exists()) {
           const userData = snapshot.data() as UserProfile;
           setProfile(userData);
+          try {
+            localStorage.setItem(`eco_user_profile_${user.uid}`, JSON.stringify(userData));
+          } catch {}
           syncBadgesWithFirestorePoints(userData.points || 0, user.uid);
           if (checkIsAdmin(userData.role, user.email)) {
             setIsAdmin(true);
           }
         }
+        setLoading(false);
       }, (e) => {
         if (auth.currentUser) {
-          console.error("User profile listener failed:", e);
+          console.warn("User profile listener note:", e);
+          try {
+            const cachedSelf = localStorage.getItem(`eco_user_profile_${user.uid}`);
+            if (cachedSelf) {
+              const parsed = JSON.parse(cachedSelf);
+              setProfile(parsed);
+              syncBadgesWithFirestorePoints(parsed.points || 0, user.uid);
+            }
+          } catch {}
         }
+        setLoading(false);
       });
 
-      fetchData();
+      // 2. Real-time community impact listener (aggregated across users)
+      unsubscribeUsers = onSnapshot(query(collection(db, "users"), limit(50)), (snap) => {
+        setIsQuotaLimited(false);
+        if (!snap.empty) {
+          const communityPoints = snap.docs.reduce((sum, doc) => sum + (doc.data().points || 0), 0);
+          setCommunityCO2(calculateCO2(communityPoints));
+          setCommunityElectricity(calculateElectricity(communityPoints));
+          setCommunityWater(calculateWater(communityPoints));
+          setCommunityWaste(calculateWaste(communityPoints));
+        } else {
+          const { all_users } = getSocialState();
+          const basePoints = 1250;
+          const localPoints = all_users.reduce((sum, u) => sum + (u.points || 0), 0);
+          const total = Math.max(basePoints, basePoints + localPoints);
+          setCommunityCO2(calculateCO2(total));
+          setCommunityElectricity(calculateElectricity(total));
+          setCommunityWater(calculateWater(total));
+          setCommunityWaste(calculateWaste(total));
+        }
+      }, (e) => {
+        console.warn("Community users snapshot note (offline/quota):", e);
+        setIsQuotaLimited(true);
+        const { all_users } = getSocialState();
+        const basePoints = 1250;
+        const localPoints = all_users.reduce((sum, u) => sum + (u.points || 0), 0);
+        const total = Math.max(basePoints, basePoints + localPoints);
+        setCommunityCO2(calculateCO2(total));
+        setCommunityElectricity(calculateElectricity(total));
+        setCommunityWater(calculateWater(total));
+        setCommunityWaste(calculateWaste(total));
+      });
+
+      // 3. Real-time daily challenges listener
+      unsubscribeChallenges = onSnapshot(query(collection(db, "challenges"), where("isDaily", "==", true), limit(3)), (snap) => {
+        if (!snap.empty) {
+          setDailyChallenges(snap.docs.map(d => ({ challengeId: d.data().challengeId || d.id, ...d.data() } as Challenge)));
+        } else {
+          setDailyChallenges(DEFAULT_CHALLENGES.filter(c => c.isDaily).slice(0, 3));
+        }
+      }, (e) => {
+        console.warn("Daily challenges snapshot note:", e);
+        setDailyChallenges(DEFAULT_CHALLENGES.filter(c => c.isDaily).slice(0, 3));
+      });
+
+      // 4. Real-time user recent activity listener
+      unsubscribeActivity = onSnapshot(query(
+        collection(db, "completions"), 
+        where("userId", "==", user.uid),
+        limit(20)
+      ), (snap) => {
+        const sortedComps = snap.docs
+          .map(d => ({ id: d.id, ...d.data() } as Completion))
+          .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime())
+          .slice(0, 5);
+        setRecentActivity(sortedComps);
+      }, (e) => {
+        console.warn("Recent activity snapshot note:", e);
+      });
+
+      checkDailyQuiz();
     });
 
     return () => {
       unsubAuth();
       unsubscribeProfile();
+      unsubscribeUsers();
+      unsubscribeChallenges();
+      unsubscribeActivity();
     };
   }, []);
 
@@ -437,6 +472,27 @@ export default function Dashboard() {
             <StatCard icon={<Trophy className="text-yellow-500" />} label="Points" value={(profile?.points || 0) + totalSubmissionPoints} />
           </div>
         </div>
+
+        {isQuotaLimited && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex items-start justify-between gap-3 text-sm text-amber-900 dark:text-amber-200">
+            <div className="flex items-start gap-3">
+              <span className="text-xl">⚡</span>
+              <div>
+                <p className="font-bold">Firestore Free Quota Status (Cached & Offline Mode Active)</p>
+                <p className="text-xs opacity-90 mt-0.5">
+                  Firestore free tier limit is 50,000 document reads/day (resets daily at midnight PST / 00:00 UTC). When renewed or when billing is enabled, live multi-device syncing automatically resumes. Your data, streak, and earned points remain safely saved in local cache.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setIsQuotaLimited(false)}
+              className="text-xs px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-200 font-medium transition-colors flex-shrink-0"
+              title="Dismiss notice"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Your Individual Impact */}
         <section>

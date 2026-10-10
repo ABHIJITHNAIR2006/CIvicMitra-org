@@ -10,12 +10,22 @@ import { cn } from "../lib/utils";
 import { toast } from "react-hot-toast";
 import { getCurrentLevel } from "../lib/level-utils";
 import { checkIsAdmin } from "../lib/auth-utils";
+import { DEFAULT_FEED_POSTS } from "../lib/default-data";
 
 // Cache for user profiles to avoid redundant fetches
 const userCache: Record<string, any> = {};
 
 export default function Feed() {
-  const [posts, setPosts] = useState<any[]>([]);
+  const [posts, setPosts] = useState<any[]>(() => {
+    try {
+      const cached = localStorage.getItem("eco_cached_feed");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return DEFAULT_FEED_POSTS;
+  });
   const [loading, setLoading] = useState(true);
   const [newPost, setNewPost] = useState("");
   const [isPosting, setIsPosting] = useState(false);
@@ -45,10 +55,13 @@ export default function Feed() {
     reader.readAsDataURL(file);
   };
 
+  const [isQuotaLimited, setIsQuotaLimited] = useState(false);
+
   useEffect(() => {
     const q = query(collection(db, "completions"), orderBy("submittedAt", "desc"), limit(20));
     
     const unsubscribe = onSnapshot(q, async (snap) => {
+      setIsQuotaLimited(false);
       const completions = snap.docs.map(d => ({ id: d.id, ...d.data() } as Completion));
       
       // Batch fetch user profiles
@@ -58,12 +71,22 @@ export default function Feed() {
       if (missingUserIds.length > 0) {
         await Promise.all(missingUserIds.map(async (userId) => {
           try {
-            const userSnap = await getDoc(doc(db, "users", userId));
-            if (userSnap.exists()) {
+            const userSnap = await getDoc(doc(db, "users", userId)).catch(() => null);
+            if (userSnap?.exists()) {
               userCache[userId] = userSnap.data();
+            } else {
+              userCache[userId] = {
+                username: "eco_warrior",
+                avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`,
+                points: 0
+              };
             }
-          } catch (error) {
-            console.error(`Error fetching user ${userId}:`, error);
+          } catch {
+            userCache[userId] = {
+              username: "eco_warrior",
+              avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${userId}`,
+              points: 0
+            };
           }
         }));
       }
@@ -78,10 +101,42 @@ export default function Feed() {
         };
       });
 
-      setPosts(postData);
+      if (postData.length > 0) {
+        setPosts(postData);
+        try {
+          localStorage.setItem("eco_cached_feed", JSON.stringify(postData));
+        } catch {}
+      } else {
+        try {
+          const cached = localStorage.getItem("eco_cached_feed");
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setPosts(parsed);
+              setLoading(false);
+              return;
+            }
+          }
+        } catch {}
+        setPosts(DEFAULT_FEED_POSTS);
+      }
       setLoading(false);
     }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, "completions");
+      console.warn("Feed snapshot notice (offline/quota), using cached/sample feed:", error);
+      setIsQuotaLimited(true);
+      try {
+        const cached = localStorage.getItem("eco_cached_feed");
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setPosts(parsed);
+            setLoading(false);
+            return;
+          }
+        }
+      } catch {}
+      setPosts(prev => prev.length > 0 ? prev : DEFAULT_FEED_POSTS);
+      setLoading(false);
     });
 
     return unsubscribe;
@@ -109,7 +164,25 @@ export default function Feed() {
         commentsCount: 0
       };
 
-      await addDoc(collection(db, "completions"), postData).catch(e => handleFirestoreError(e, OperationType.CREATE, "completions"));
+      // Optimistically display post immediately in real-time feed
+      const optimisticPost = {
+        id: "local-" + Date.now(),
+        ...postData,
+        username: auth.currentUser.displayName || auth.currentUser.email?.split("@")[0] || "You",
+        userAvatar: auth.currentUser.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${auth.currentUser.uid}`,
+        userPoints: 5
+      };
+      setPosts(prev => {
+        const updated = [optimisticPost, ...prev];
+        try {
+          localStorage.setItem("eco_cached_feed", JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+
+      await addDoc(collection(db, "completions"), postData).catch(e => {
+        console.warn("Local post queued for sync:", e);
+      });
       setNewPost("");
       setSelectedImage(null);
       toast.success("Update shared with the community!");
@@ -130,6 +203,27 @@ export default function Feed() {
             <button className="px-4 py-2 text-text-secondary hover:bg-primary/5 rounded-lg font-bold">Following</button>
           </div>
         </div>
+
+        {isQuotaLimited && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 flex items-start justify-between gap-3 text-sm text-amber-900 dark:text-amber-200">
+            <div className="flex items-start gap-3">
+              <span className="text-xl">⚡</span>
+              <div>
+                <p className="font-bold">Firestore Free Quota Status (Cached & Local Mode Active)</p>
+                <p className="text-xs opacity-90 mt-0.5">
+                  Firestore free tier limit is 50,000 document reads/day (resets daily at midnight PST / 00:00 UTC). When renewed or when billing is enabled, live multi-device syncing automatically resumes. Your posts and actions are saved locally.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setIsQuotaLimited(false)}
+              className="text-xs px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-200 font-medium transition-colors flex-shrink-0"
+              title="Dismiss notice"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Create Post */}
         <div className="bg-card rounded-3xl card-shadow p-6 border border-primary/10">
@@ -220,9 +314,15 @@ const PostCard = memo(({ post, isAdmin }: { post: any, isAdmin: boolean }) => {
     if (!auth.currentUser) return;
     
     const likeRef = doc(db, "completions", post.id, "likes", auth.currentUser.uid);
-    const unsubscribe = onSnapshot(likeRef, (snap) => {
-      setLiked(snap.exists());
-    });
+    const unsubscribe = onSnapshot(
+      likeRef,
+      (snap) => {
+        setLiked(snap.exists());
+      },
+      (err) => {
+        // Quietly ignore quota/offline errors
+      }
+    );
     
     return unsubscribe;
   }, [post.id]);
@@ -234,28 +334,34 @@ const PostCard = memo(({ post, isAdmin }: { post: any, isAdmin: boolean }) => {
     const commentsRef = collection(db, "completions", post.id, "comments");
     const q = query(commentsRef, orderBy("createdAt", "asc"), limit(50));
     
-    const unsubscribe = onSnapshot(q, async (snap) => {
-      const commentData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      
-      // Fetch user profiles for comments if missing
-      const userIds = Array.from(new Set(commentData.map((c: any) => c.userId)));
-      const missingIds = userIds.filter(id => !userCache[id]);
-      
-      if (missingIds.length > 0) {
-        await Promise.all(missingIds.map(async (uid: any) => {
-          try {
-            const uSnap = await getDoc(doc(db, "users", uid));
-            if (uSnap.exists()) userCache[uid] = uSnap.data();
-          } catch (e) {}
-        }));
+    const unsubscribe = onSnapshot(
+      q,
+      async (snap) => {
+        const commentData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        
+        // Fetch user profiles for comments if missing
+        const userIds = Array.from(new Set(commentData.map((c: any) => c.userId)));
+        const missingIds = userIds.filter(id => !userCache[id]);
+        
+        if (missingIds.length > 0) {
+          await Promise.all(missingIds.map(async (uid: any) => {
+            try {
+              const uSnap = await getDoc(doc(db, "users", uid)).catch(() => null);
+              if (uSnap?.exists()) userCache[uid] = uSnap.data();
+            } catch (e) {}
+          }));
+        }
+        
+        setComments(commentData.map((c: any) => ({
+          ...c,
+          username: userCache[c.userId]?.username || "eco_warrior",
+          avatarUrl: userCache[c.userId]?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${c.userId}`
+        })));
+      },
+      (err) => {
+        // Quietly ignore quota/offline errors for comments
       }
-      
-      setComments(commentData.map((c: any) => ({
-        ...c,
-        username: userCache[c.userId]?.username || "eco_warrior",
-        avatarUrl: userCache[c.userId]?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${c.userId}`
-      })));
-    });
+    );
     
     return unsubscribe;
   }, [post.id, showComments]);

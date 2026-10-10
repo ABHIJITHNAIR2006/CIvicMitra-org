@@ -42,7 +42,7 @@ export default function LoginPage() {
       if (!cleanIdentifier.includes("@")) {
         // Resolve username to email from the public usernames collection
         const usernameSnap = await getDoc(doc(db, "usernames", cleanIdentifier)).catch((err) => {
-          console.error("Error looking up username:", err);
+          console.warn("Username lookup notice (offline/quota):", err);
           return null;
         });
 
@@ -69,7 +69,7 @@ export default function LoginPage() {
       // Ensure /users/{uid} profile exists before navigating to /dashboard
       const userDocRef = doc(db, "users", user.uid);
       const userDoc = await getDoc(userDocRef).catch((e) => {
-        console.error("User profile fetch failed:", e);
+        console.warn("User profile fetch notice (offline/quota):", e);
         return null;
       });
 

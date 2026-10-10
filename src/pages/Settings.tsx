@@ -6,7 +6,7 @@ import { cn } from "../lib/utils";
 import { auth, db } from "../firebase";
 import { doc, getDoc } from "firebase/firestore";
 import { UserProfile } from "../types";
-import { handleFirestoreError, OperationType } from "../lib/firestore-guard";
+import { handleFirestoreError, OperationType, isFirestoreQuotaOrOfflineError } from "../lib/firestore-guard";
 import { useTheme } from "../contexts/ThemeContext";
 import { isScannerEnabled, setScannerEnabled, MAX_SCANS_PER_DAY } from "../lib/scan-utils";
 
@@ -38,9 +38,21 @@ export default function Settings() {
         const snap = await getDoc(doc(db, "users", auth.currentUser.uid)).catch(e => handleFirestoreError(e, OperationType.GET, `users/${auth.currentUser?.uid}`));
         if (snap && snap.exists()) {
           setProfile(snap.data() as UserProfile);
+        } else {
+          try {
+            const cached = localStorage.getItem(`eco_user_profile_${auth.currentUser.uid}`);
+            if (cached) setProfile(JSON.parse(cached));
+          } catch {}
         }
       } catch (error) {
-        console.error("Error fetching settings profile:", error);
+        if (!isFirestoreQuotaOrOfflineError(error)) {
+          console.error("Error fetching settings profile:", error);
+        } else {
+          try {
+            const cached = localStorage.getItem(`eco_user_profile_${auth.currentUser.uid}`);
+            if (cached) setProfile(JSON.parse(cached));
+          } catch {}
+        }
       } finally {
         setLoading(false);
       }

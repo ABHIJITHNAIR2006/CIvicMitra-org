@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { doc, getDoc, collection, query, where, getDocs, orderBy } from "firebase/firestore";
 import { db, auth } from "../firebase";
-import { handleFirestoreError, OperationType } from "../lib/firestore-guard";
+import { handleFirestoreError, OperationType, isFirestoreQuotaOrOfflineError } from "../lib/firestore-guard";
 import DashboardLayout from "../layouts/DashboardLayout";
 import { UserProfile, Completion } from "../types";
 import { motion, AnimatePresence } from "motion/react";
@@ -49,20 +49,32 @@ export default function Profile() {
       if (!auth.currentUser) return;
       try {
         const userDoc = await getDoc(doc(db, "users", auth.currentUser.uid)).catch(e => handleFirestoreError(e, OperationType.GET, `users/${auth.currentUser?.uid}`));
-        if (userDoc && userDoc.exists()) setProfile(userDoc.data() as UserProfile);
-        else if (userDoc && !userDoc.exists()) console.warn("User profile document not found");
+        if (userDoc && userDoc.exists()) {
+          setProfile(userDoc.data() as UserProfile);
+        } else {
+          try {
+            const cached = localStorage.getItem(`eco_user_profile_${auth.currentUser.uid}`);
+            if (cached) setProfile(JSON.parse(cached));
+          } catch {}
+        }
 
         const compQuery = query(collection(db, "completions"), where("userId", "==", auth.currentUser.uid));
         const compSnap = await getDocs(compQuery).catch(e => handleFirestoreError(e, OperationType.LIST, "completions"));
-        if (compSnap) {
+        if (compSnap && compSnap.docs) {
           const sorted = compSnap.docs
             .map(d => ({ id: d.id, ...d.data() } as Completion))
             .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
           setCompletions(sorted);
         }
-
       } catch (error) {
-        console.error("Error fetching profile:", error);
+        if (!isFirestoreQuotaOrOfflineError(error)) {
+          console.error("Error fetching profile:", error);
+        } else {
+          try {
+            const cached = localStorage.getItem(`eco_user_profile_${auth.currentUser.uid}`);
+            if (cached) setProfile(JSON.parse(cached));
+          } catch {}
+        }
       } finally {
         setLoading(false);
       }

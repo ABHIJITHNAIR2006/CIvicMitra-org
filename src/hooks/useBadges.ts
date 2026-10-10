@@ -34,41 +34,46 @@ export function useBadges() {
       return;
     }
 
+    const currentLocal = getStats(currentUser.uid);
+
     try {
       // 1. Fetch latest points from Firestore
-      const userDoc = await getDoc(doc(db, "users", currentUser.uid));
-      const userData = userDoc.data();
-      const points = userData?.points || 0;
+      const userDoc = await getDoc(doc(db, "users", currentUser.uid)).catch(() => null);
+      const userData = userDoc?.exists() ? userDoc.data() : null;
+      const points = userData?.points ?? currentLocal.points ?? 0;
 
       // 2. Fetch quiz completions
-      const quizSnap = await getDocs(query(collection(db, "quiz_attempts"), where("userId", "==", currentUser.uid)));
-      const quizzes_completed = quizSnap.size;
-      const perfect_quiz_scores = quizSnap.docs.filter(d => d.data().score === 50).length;
+      const quizSnap = await getDocs(query(collection(db, "quiz_attempts"), where("userId", "==", currentUser.uid))).catch(() => null);
+      const quizzes_completed = quizSnap ? quizSnap.size : currentLocal.quizzes_completed;
+      const perfect_quiz_scores = quizSnap ? quizSnap.docs.filter(d => d.data().score === 50).length : currentLocal.perfect_quiz_scores;
       
       // Consecutive perfect quizzes
-      const sortedQuizzes = quizSnap.docs
-        .map(d => d.data())
-        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      
-      let consecutive_perfect_quizzes = 0;
-      for (const quiz of sortedQuizzes) {
-        if (quiz.score === 50) consecutive_perfect_quizzes++;
-        else break;
+      let consecutive_perfect_quizzes = currentLocal.consecutive_perfect_quizzes;
+      if (quizSnap) {
+        const sortedQuizzes = quizSnap.docs
+          .map(d => d.data())
+          .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        
+        consecutive_perfect_quizzes = 0;
+        for (const quiz of sortedQuizzes) {
+          if (quiz.score === 50) consecutive_perfect_quizzes++;
+          else break;
+        }
       }
 
       // 3. Fetch event registrations
-      let events_registered = 0;
+      let events_registered = currentLocal.events_registered;
       if (currentUser.email) {
-        const eventSnap = await getDocs(query(collection(db, "event_registrations"), where("email", "==", currentUser.email)));
-        events_registered = eventSnap.size;
+        const eventSnap = await getDocs(query(collection(db, "event_registrations"), where("email", "==", currentUser.email))).catch(() => null);
+        if (eventSnap) events_registered = eventSnap.size;
       }
 
       // 4. Fetch proof submissions
-      const proofSnap = await getDocs(query(collection(db, "completions"), where("userId", "==", currentUser.uid)));
-      const proofs_submitted = proofSnap.size;
+      const proofSnap = await getDocs(query(collection(db, "completions"), where("userId", "==", currentUser.uid))).catch(() => null);
+      const proofs_submitted = proofSnap ? proofSnap.size : currentLocal.proofs_submitted;
 
       // 5. Join order (approximate if not stored)
-      let join_order = userData?.joinOrder || 100;
+      let join_order = userData?.joinOrder || currentLocal.join_order || 100;
       if (!userData?.joinOrder && userData?.createdAt) {
         try {
           const countSnap = await getCountFromServer(
@@ -76,7 +81,7 @@ export function useBadges() {
           );
           join_order = countSnap.data().count + 1;
         } catch {
-          join_order = 100;
+          join_order = currentLocal.join_order || 100;
         }
       }
 
@@ -105,7 +110,10 @@ export function useBadges() {
         }
       }
     } catch (error) {
-      console.error("Error refreshing badge stats:", error);
+      console.warn("Badge stats refresh notice (quota/offline fallback):", error);
+      const fallbackStats = getStats(currentUser.uid);
+      setStats(fallbackStats);
+      setUserBadges(getUserBadges(currentUser.uid));
     }
   }, []);
 

@@ -54,7 +54,37 @@ function cleanObject(obj: any): any {
   return clean;
 }
 
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+// Helper to check if an error is caused by Firestore quota limits or client offline state
+export function isFirestoreQuotaOrOfflineError(error: unknown): boolean {
+  if (!error) return false;
+  let msg = '';
+  let code = '';
+  if (error instanceof Error) {
+    msg = error.message;
+    // @ts-ignore
+    code = error.code || '';
+  } else if (typeof error === 'object' && error !== null) {
+    // @ts-ignore
+    msg = error.message || error.error || String(error);
+    // @ts-ignore
+    code = error.code || error.errorCode || '';
+  } else {
+    msg = String(error);
+  }
+  const lowerMsg = msg.toLowerCase();
+  return (
+    code === 'resource-exhausted' ||
+    code === 'unavailable' ||
+    lowerMsg.includes('resource-exhausted') ||
+    lowerMsg.includes('quota') ||
+    lowerMsg.includes('free daily read units') ||
+    lowerMsg.includes('quota metric') ||
+    lowerMsg.includes('the client is offline') ||
+    lowerMsg.includes('failed-precondition')
+  );
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): any {
   // Safely extract error message
   let errorMessage = "Unknown error";
   let errorCode = "unknown";
@@ -65,24 +95,24 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     if (error.code) errorCode = error.code;
   } else if (typeof error === 'object' && error !== null) {
     // @ts-ignore
-    errorMessage = error.message || String(error);
+    errorMessage = error.message || error.error || String(error);
     // @ts-ignore
     if (error.code) errorCode = error.code;
   } else {
     errorMessage = String(error);
   }
   
-  // Special handling for the "client is offline" error
-  if (errorMessage.toLowerCase().includes('the client is offline')) {
-    const configError = "Firestore connection failed (client is offline). Please check your Firebase configuration.";
-    console.error(configError);
-    throw new Error(JSON.stringify({
-      error: configError,
-      errorCode: errorCode,
-      originalError: errorMessage,
-      operationType,
-      path
-    }));
+  // Special handling for quota limit exceeded / resource exhausted / offline
+  if (isFirestoreQuotaOrOfflineError(error) || errorMessage.toLowerCase().includes('quota') || errorCode === 'resource-exhausted') {
+    console.warn(`[Firestore Quota/Offline Notice] Handled gracefully for ${operationType} on ${path || 'unknown'}:`, errorMessage);
+    // Return safe dummy objects to prevent crashing callers that await getDocs or getDoc
+    if (operationType === OperationType.LIST) {
+      return { empty: true, size: 0, docs: [] } as any;
+    }
+    if (operationType === OperationType.GET) {
+      return { exists: () => false, data: () => undefined, id: path || '' } as any;
+    }
+    return undefined as any;
   }
 
   const errInfo: FirestoreErrorInfo = {

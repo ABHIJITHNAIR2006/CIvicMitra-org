@@ -18,6 +18,19 @@ export default function DailyQuizCard() {
     if (!user) return;
     setLoading(true);
     const today = new Date().toISOString().split('T')[0];
+
+    // Check offline cache first
+    try {
+      const localAttempt = localStorage.getItem(`eco_quiz_${user.uid}_${today}`);
+      if (localAttempt) {
+        const parsed = JSON.parse(localAttempt);
+        setHasAttempted(true);
+        setLastScore(parsed.score ?? 50);
+        setLoading(false);
+        return;
+      }
+    } catch {}
+
     try {
       const q = query(
         collection(db, "quiz_attempts"),
@@ -25,15 +38,20 @@ export default function DailyQuizCard() {
         where("date", "==", today),
         limit(1)
       );
-      const snap = await getDocs(q).catch(e => handleFirestoreError(e, OperationType.LIST, "quiz_attempts"));
+      const snap = await getDocs(q).catch((e) => handleFirestoreError(e, OperationType.LIST, "quiz_attempts"));
       if (snap && !snap.empty) {
         setHasAttempted(true);
-        setLastScore(snap.docs[0].data().score);
+        const score = snap.docs[0].data().score;
+        setLastScore(score);
+        try {
+          localStorage.setItem(`eco_quiz_${user.uid}_${today}`, JSON.stringify({ score }));
+        } catch {}
       } else {
         setHasAttempted(false);
       }
     } catch (error) {
-      console.error("Error checking quiz attempt:", error);
+      console.warn("Quiz attempt status note (quota/offline):", error);
+      setHasAttempted(false);
     } finally {
       setLoading(false);
     }

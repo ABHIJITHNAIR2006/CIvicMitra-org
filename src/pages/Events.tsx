@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { collection, getDocs, query, orderBy, deleteDoc, doc } from "firebase/firestore";
+import { collection, onSnapshot, getDocs, query, orderBy, deleteDoc, doc } from "firebase/firestore";
 import { db } from "../firebase";
 import { handleFirestoreError, OperationType } from "../lib/firestore-guard";
 import DashboardLayout from "../layouts/DashboardLayout";
@@ -12,9 +12,10 @@ import { toast } from "react-hot-toast";
 import { useEventData, Registration, Submission } from "../lib/event-registration-utils";
 import { RegistrationModal, ProofSubmissionModal, ParticipantsList } from "../components/EventFeatures";
 import ConfirmModal from "../components/ConfirmModal";
+import { DEFAULT_EVENTS } from "../lib/default-data";
 
 export default function Events() {
-  const [events, setEvents] = useState<any[]>([]);
+  const [events, setEvents] = useState<any[]>(DEFAULT_EVENTS);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<any>(null);
@@ -27,21 +28,27 @@ export default function Events() {
   const { registrations, submissions, loading: eventDataLoading, isUserRegistered } = useEventData();
   const [seeding, setSeeding] = useState(false);
 
-  const fetchEvents = useCallback(async () => {
-    try {
-      const q = query(collection(db, "events"), orderBy("startDate", "asc"));
-      const snap = await getDocs(q).catch(e => {
-        handleFirestoreError(e, OperationType.LIST, "events");
-        return null;
-      });
-      if (snap) {
+  useEffect(() => {
+    setLoading(true);
+    const q = query(collection(db, "events"), orderBy("startDate", "asc"));
+    const unsubscribe = onSnapshot(q, (snap) => {
+      if (!snap.empty) {
         setEvents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } else {
+        setEvents(DEFAULT_EVENTS);
       }
-    } catch (error: any) {
-      console.error("Error fetching events:", error?.message || "Unknown error");
-    } finally {
       setLoading(false);
-    }
+    }, (error: any) => {
+      console.warn("Using fallback events catalog (quota/offline):", error?.message || "Unknown error");
+      setEvents(DEFAULT_EVENTS);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  const fetchEvents = useCallback(() => {
+    // onSnapshot listener handles live updates automatically
   }, []);
 
   const handleSeedData = async () => {

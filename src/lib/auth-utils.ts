@@ -1,7 +1,7 @@
 import { GoogleAuthProvider, signInWithPopup, User } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { auth, db } from "../firebase";
-import { handleFirestoreError, OperationType } from "./firestore-guard";
+import { handleFirestoreError, OperationType, isFirestoreQuotaOrOfflineError } from "./firestore-guard";
 import { Role } from "../types";
 
 export const ADMIN_EMAIL = "arcadeabhi6@gmail.com";
@@ -75,10 +75,12 @@ export const signInWithGoogle = async () => {
       }
     }
   } catch (error) {
-    console.error("Error during profile sync:", error);
-    // We don't necessarily want to block the login if profile sync fails, 
-    // but we should at least log it. However, the app depends on the profile.
-    throw error;
+    if (isFirestoreQuotaOrOfflineError(error)) {
+      console.warn("Firestore quota or offline during profile sync, continuing:", error);
+    } else {
+      console.error("Error during profile sync:", error);
+      throw error;
+    }
   }
 
   return user;
